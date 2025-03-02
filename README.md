@@ -34,7 +34,8 @@ BSP map files reference assets (e.g., Materials/Walls/brick01.vtf) case-insensit
    ```
 
 ### Execution
-- Auto-detect: ./lbspcfw.sh (select **Y** for autodetect, choose game).
+- Auto-detect:
+  - Run `./lbspcfw.sh` (select **Y** to auto detect, choose game)
   - If you do not see your game in the list, please proceed with the manual method
   - Maps already in your game folder `download/maps` are used, negating the need to copy map files
 - Manual:
