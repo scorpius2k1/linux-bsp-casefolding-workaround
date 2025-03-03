@@ -28,10 +28,18 @@ BSP map files reference assets (e.g., Materials/Walls/brick01.vtf) case-insensit
    ```
    git clone https://github.com/scorpius2k1/linux-bsp-casefolding-workaround.git
    ```
-2. Set permissions:
+2. Change to local repo folder
+   ```
+   cd linux-bsp-casefolding-workaround
+   ```
+3. Set permissions:
    ```
    chmod +x lbspcfw.sh
    ```
+Alternatively, clone & run with one command:
+```
+git clone https://github.com/scorpius2k1/linux-bsp-casefolding-workaround.git && cd linux-bsp-casefolding-workaround && chmod +x lbspcfw.sh && ./lbspcfw.sh
+```
 
 ### Execution
 - Auto-detect:
