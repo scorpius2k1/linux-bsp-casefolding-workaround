@@ -194,6 +194,41 @@ game_folder() {
     return 1
 }
 
+process_bsp() {
+    local -a cursors=("/" "-" "\\" "|")
+    local -i cursor_index=0
+
+    for bsp in "${bsp_files[@]}"; do
+
+        local cursor="${cursors[cursor_index]}"
+        local bsp_name=$(basename "$bsp")
+
+        ((cursor_index = (cursor_index + 1) % 4))       
+        ((bsp_processed++))
+
+        color_msg "blue" "\r\033[K [$cursor] Processing Maps $bsp_processed/$bsp_total $(((bsp_processed) * 100 / bsp_total))%% \033[36m${bsp_name%.*}\033[0m..." "bold"
+        if ! "$vpkeditcli" --no-progress --output "$data_path" --extract / "$bsp" &>/dev/null; then
+            color_msg "yellow" "Warning: Failed to extract '$bsp_name', skipping."
+            sleep 1
+            continue
+        fi
+
+        sleep 0.25
+
+        color_msg "bgreen" " (Syncing)"
+        local materials="$data_path/${bsp_name%.*}/materials"
+        local models="$data_path/${bsp_name%.*}/models"
+        local sound="$data_path/${bsp_name%.*}/sound"
+
+        [ -d "$materials" ] && rsync -aAHX "$materials" "$steampath"
+        [ -d "$models" ] && rsync -aAHX "$models" "$steampath"
+        [ -d "$sound" ] && rsync -aAHX "$sound" "$steampath"
+
+        sleep 0.25
+        fflush stdout 2>/dev/null || true
+    done
+}
+
 get_latest_vpk() {
     color_msg "white" "Updating 'vpkedit' to latest release\n(https://github.com/craftablescience/VPKEdit)..."
     printf "\n"
