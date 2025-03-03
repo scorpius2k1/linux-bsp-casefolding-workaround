@@ -262,21 +262,23 @@ shorten_path() {
 }
 
 check_steampath() {
-    local paths=(
-        "$HOME/.local/share/Steam/steamapps/common" # Default
+    local steamroot=(
+        "$HOME/.local/share/Steam/steamapps/common" # System
+        "$HOME/.steam/steam/steamapps/common" # System
         "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common" # Flatpak
         "$HOME/snap/steam/common/.local/share/Steam/steamapps/common" # Snap
     )
-    local messages=(
-        "Default"
+    local steamtype=(
+        "System"
+        "System"
         "Flatpak"
         "Snap"
     )
 
-    for ((i = 0; i < ${#paths[@]}; i++)); do
-        if [ -d "${paths[$i]}" ]; then
-            steampath="${paths[$i]}"
-            color_msg "green" "${messages[$i]} Steam Install Detected\n\n"
+    for ((i = 0; i < ${#steamroot[@]}; i++)); do
+        if [ -d "${steamroot[$i]}" ]; then
+            steampath="${steamroot[$i]}"
+            color_msg "green" "${steamtype[$i]} Steam Install Detected\n\n"
             return 0
         fi
     done
