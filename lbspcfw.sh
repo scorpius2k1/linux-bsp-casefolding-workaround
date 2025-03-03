@@ -125,53 +125,62 @@ game_root() {
 game_folder() {
     local root_path="${1%/}"
 
+    # Validate root path
     if [ ! -d "$root_path" ]; then
         printf "Error: '%s' is not a valid directory\n" "$root_path" >&2
         return 1
     fi
 
-    local -a target_folders=("cfg" "maps")
+    local -a validate=("cfg" "maps" "download" "gameinfo.txt")
     local current_parent=""
-    local -A found_folders
+    declare -A found_items
 
-    while IFS= read -r -d '' folder; do
+    # Use find to get only direct children (maxdepth 1) of each parent
+    while IFS= read -r -d '' item; do
         local parent
-        parent=$(dirname "$folder")
-        local folder_name
-        folder_name=$(basename "$folder")
+        parent=$(dirname "$item")
+        local item_name
+        item_name=$(basename "$item")
 
-        if [ "$parent" != "$current_parent" ] && [ -n "$current_parent" ]; then
-            local -i all_found=1
-            for target in "${target_folders[@]}"; do
-                if [ -z "${found_folders[$target]}" ]; then
-                    all_found=0
-                    break
+        # Only proceed if this is a new parent directory
+        if [ "$parent" != "$current_parent" ]; then
+            # Check if all targets were found in the previous parent
+            if [ -n "$current_parent" ]; then
+                local all_found=1
+                for target in "${validate[@]}"; do
+                    if [ -z "${found_items[$target]}" ]; then
+                        all_found=0
+                        break
+                    fi
+                done
+                if [ "$all_found" -eq 1 ]; then
+                    printf '%s\n' "$current_parent"
+                    return 0
                 fi
-            done
-            if [ "$all_found" -eq 1 ]; then
-                printf '%s\n' "$current_parent"
-                return 0
             fi
-            unset found_folders
-            declare -A found_folders
-        fi
-
-        if [ "$parent" != "$root_path" ]; then
+            # Reset found_items for the new parent
+            declare -A found_items
             current_parent="$parent"
         fi
 
-        for target in "${target_folders[@]}"; do
-            if [ "${folder_name,,}" = "$target" ] && [ -d "$folder" ]; then
-                found_folders["$target"]=1
-                break
-            fi
-        done
+        # Only consider direct children of current_parent
+        if [ "$(dirname "$item")" = "$current_parent" ]; then
+            for target in "${validate[@]}"; do
+                if [ "${item_name,,}" = "${target,,}" ]; then
+                    if [ -d "$item" ] || [ -f "$item" ]; then
+                        found_items["$target"]=1
+                    fi
+                    break
+                fi
+            done
+        fi
     done < <(find "$root_path" -maxdepth 2 -print0 2>/dev/null)
 
+    # Final check for the last parent
     if [ -n "$current_parent" ]; then
-        local -i all_found=1
-        for target in "${target_folders[@]}"; do
-            if [ -z "${found_folders[$target]}" ]; then
+        local all_found=1
+        for target in "${validate[@]}"; do
+            if [ -z "${found_items[$target]}" ]; then
                 all_found=0
                 break
             fi
@@ -183,40 +192,6 @@ game_folder() {
     fi
 
     return 1
-}
-
-process_bsp() {
-    local -a cursors=("/" "-" "\\" "|")
-    local -i cursor_index=0
-
-    for bsp in "${bsp_files[@]}"; do
-        local cursor="${cursors[cursor_index]}"
-        local bsp_name=$(basename "$bsp")
-
-        ((cursor_index = (cursor_index + 1) % 4))       
-        ((bsp_processed++))
-
-        color_msg "blue" "\r\033[K [$cursor] Processing Maps $bsp_processed/$bsp_total $(((bsp_processed) * 100 / bsp_total))%% \033[36m${bsp_name%.*}\033[0m..." "bold"
-
-        if ! "$vpkeditcli" --no-progress --output "$data_path" --extract / "$bsp" &>/dev/null; then
-            color_msg "yellow" "Warning: Failed to extract '$bsp_name', skipping."
-            sleep 1
-            continue
-        fi
-        sleep 0.25
-
-        color_msg "bgreen" " (Syncing)"
-        local materials="$data_path/${bsp_name%.*}/materials"
-        local models="$data_path/${bsp_name%.*}/models"
-        local sound="$data_path/${bsp_name%.*}/sound"
-
-        [ -d "$materials" ] && rsync -aAHX "$materials" "$steampath"
-        [ -d "$models" ] && rsync -aAHX "$models" "$steampath"
-        [ -d "$sound" ] && rsync -aAHX "$sound" "$steampath"
-
-        sleep 0.25
-        fflush stdout 2>/dev/null || true
-    done
 }
 
 get_latest_vpk() {
@@ -350,7 +325,7 @@ if [ "$autodetect" -eq 1 ]; then
         steampath="$steampath/download"
         color_msg "green" "Game folder set to '${steampath##*/common/}'\n"
     else
-        color_msg "red" "Invalid game data, exiting.\n\n" "bold"
+        color_msg "red" "Error: Failed to validate game, exiting.\n\n" "bold"
         exit 1
     fi
 else
