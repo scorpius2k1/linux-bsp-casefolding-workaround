@@ -7,7 +7,7 @@
 # License : https://www.gnu.org/licenses/gpl-3.0.en.html#license-text
 #
 
-version="1.0"
+version="1.01"
 logo="$(cat <<EOF
   _ _                     __          
  | | |                   / _|         
@@ -20,14 +20,14 @@ logo="$(cat <<EOF
 EOF
 )"
 
-# Default paths
-declare bsp_path="$PWD/bsp"
-declare data_path="$PWD/.data"
-declare output_path="$PWD/fix"
+declare path_bsp="$PWD/bsp"
+declare path_data="$PWD/.data"
+declare path_output="$PWD/fix"
+declare path_log="$PWD/log"
 declare vpkeditcli="$PWD/vpkeditcli"
-declare deps=(curl unzip rsync)
-declare -i bsp_processed=0  # Integer type
-declare -i autodetect=0     # Integer type
+declare dependencies=(curl unzip rsync parallel)
+declare -i bsp_processed=0
+declare -i autodetect=0
 
 prompt() {
     while true; do
@@ -43,7 +43,7 @@ prompt() {
 checkdeps() {
 	local missing=0
 
-	for app in "${deps[@]}"
+	for app in "${dependencies[@]}"
 	do
 		if ! command -v $app &> /dev/null
 		then
@@ -195,57 +195,129 @@ game_folder() {
 }
 
 process_bsp() {
+    local bsp=""
+    local -i failed
     local -a cursors=("/" "-" "\\" "|")
     local -i cursor_index=0
 
-    for bsp in "${bsp_files[@]}"; do
+    # Ensure variables are exported for parallel
+    export vpkeditcli="$vpkeditcli"
+    export path_data="$path_data"
+    export steampath="$steampath"
+    export path_log="$path_log"
 
-        local cursor="${cursors[cursor_index]}"
-        local bsp_name=$(basename "$bsp")
+    # Create FIFO
+    local fifo=$(mktemp -u)
+    mkfifo "$fifo"
+    trap 'rm -f "$fifo"' EXIT
 
-        ((cursor_index = (cursor_index + 1) % 4))       
-        ((bsp_processed++))
+    # Only adjust ulimit if necessary
+    [ "$(ulimit -n)" -lt 8192 ] && ulimit -n 8192
 
-        color_msg "blue" "\r\033[K [$cursor] Processing Maps $bsp_processed/$bsp_total $(((bsp_processed) * 100 / bsp_total))%% \033[36m${bsp_name%.*}\033[0m..." "bold"
-        if ! "$vpkeditcli" --no-progress --output "$data_path" --extract / "$bsp" &>/dev/null; then
-            color_msg "yellow" "Warning: Failed to extract '$bsp_name', skipping."
-            sleep 1
+    color_msg "blue" "Initializing..." "bold"
+    
+    # Run vpkeditcli and rsync in parallel, streaming results to FIFO
+    parallel --jobs $(nproc) --load 90% --memfree 512M --keep-order --line-buffer --quote sh -c '
+        bsp="$1"
+        bsp_name=$(basename "$bsp")
+        echo "Debug: bsp=$bsp" >&2
+        if "$vpkeditcli" --no-progress --output "$path_data" --extract / "$bsp" 2> "$path_log/${bsp_name}.log"; then
+            echo "Debug: Extraction succeeded for $bsp" >&2
+            materials="$path_data/${bsp_name%.*}/materials"
+            models="$path_data/${bsp_name%.*}/models"
+            sound="$path_data/${bsp_name%.*}/sound"
+            [ -d "$materials" ] && rsync -aAHX "$materials" "$steampath"
+            [ -d "$models" ] && rsync -aAHX "$models" "$steampath"
+            [ -d "$sound" ] && rsync -aAHX "$sound" "$steampath"
+            echo "Debug: Sync completed for $bsp" >&2
+            rm -f "$path_log/${bsp_name}.log"
+            echo "SUCCESS: $bsp"
+        else
+            echo "Debug: Extraction failed for $bsp" >&2
+            echo "FAILED: $bsp"
+        fi
+    ' sh ::: "${bsp_files[@]}" > "$fifo" 2> "$path_log/process.log" &
+
+    local parallel_pid=$!
+
+    # Process FIFO output
+    while IFS= read -r result || [ -n "$result" ]; do
+        bsp=""
+        failed=0
+        if [[ "$result" =~ ^FAILED:\ (.+)$ ]]; then
+            bsp="${BASH_REMATCH[1]}"
+            failed=1
+        elif [[ "$result" =~ ^SUCCESS:\ (.+)$ ]]; then
+            bsp="${BASH_REMATCH[1]}"
+        else
             continue
         fi
 
-        sleep 0.25
+        local cursor="${cursors[cursor_index]}"
+        local bsp_name=$(basename "$bsp")
+        ((cursor_index = (cursor_index + 1) % 4))
+        ((bsp_processed++))
 
-        color_msg "bgreen" " (Syncing)"
-        local materials="$data_path/${bsp_name%.*}/materials"
-        local models="$data_path/${bsp_name%.*}/models"
-        local sound="$data_path/${bsp_name%.*}/sound"
+        color_msg "blue" "\r\033[K [$cursor] Processing Maps $bsp_processed/$bsp_total $(((bsp_processed) * 100 / bsp_total))%% \033[36m${bsp_name%.*}..." "bold"
 
-        [ -d "$materials" ] && rsync -aAHX "$materials" "$steampath"
-        [ -d "$models" ] && rsync -aAHX "$models" "$steampath"
-        [ -d "$sound" ] && rsync -aAHX "$sound" "$steampath"
+        if [ "$failed" -eq 1 ]; then
+            color_msg "yellow" "Warning: Failed to extract '$bsp_name', skipping. Check error log at $path_log/${bsp_name}.log"
+            sleep 1
+        fi
+    done < "$fifo"
 
-        sleep 0.25
-        fflush stdout 2>/dev/null || true
-    done
+    wait "$parallel_pid"
+    printf "\n"
+
+    rm -rf $fifo
 }
 
 get_latest_vpk() {
-    color_msg "white" "Updating 'vpkedit' to latest release\n(https://github.com/craftablescience/VPKEdit)..."
-    printf "\n"
-    local latest_url
-    latest_url=$(curl -s https://api.github.com/repos/craftablescience/VPKEdit/releases/latest \
-        | grep "browser_download_url.*.zip" \
-        | grep "Linux-Binaries" \
-        | cut -d '"' -f 4)
-    if [ -z "$latest_url" ]; then
-        color_msg "red" "Error: Failed to fetch latest VPKEdit release URL\n" "bold"
-        exit 1
+    local vpkedit_file="vpkedit"  # Adjust this to the actual extracted filename if different
+    local timestamp_file=".vpkedit"
+    local download_needed=1
+    local current_time=$(date +%s)
+    local last_modified
+    local time_diff
+
+    # Check if vpkedit exists and timestamp file exists
+    if [ -f "$vpkedit_file" ] && [ -f "$timestamp_file" ]; then
+        # Read the stored timestamp
+        last_modified=$(cat "$timestamp_file" 2>/dev/null)
+        if [ -n "$last_modified" ]; then
+            # Calculate time difference in seconds
+            time_diff=$((current_time - last_modified))
+            # 86400 seconds = 24 hours
+            if [ "$time_diff" -lt 86400 ]; then
+                download_needed=0
+                color_msg "white" "VPKEdit is up to date (last updated less than 24 hours ago)\n"
+                return 0
+            fi
+        fi
     fi
-    local filename
-    filename=$(basename "$latest_url")
-    curl -s -L -o "$filename" "$latest_url" || { color_msg "red" "Error: Failed to download VPKEdit\n" "bold"; exit 1; }
-    unzip -o "$filename" &>/dev/null || { color_msg "red" "Error: Failed to unzip VPKEdit\n" "bold"; exit 1; }
-    rm -f "$filename"
+
+    # If we need to download (either file doesn't exist or is older than 24 hours)
+    if [ "$download_needed" -eq 1 ]; then
+        color_msg "white" "Updating 'vpkedit' to latest release\n(https://github.com/craftablescience/VPKEdit)..."
+        printf "\n"
+        local latest_url
+        latest_url=$(curl -s https://api.github.com/repos/craftablescience/VPKEdit/releases/latest \
+            | grep "browser_download_url.*.zip" \
+            | grep "Linux-Binaries" \
+            | cut -d '"' -f 4)
+        if [ -z "$latest_url" ]; then
+            color_msg "red" "Error: Failed to fetch latest VPKEdit release URL\n" "bold"
+            exit 1
+        fi
+        local filename
+        filename=$(basename "$latest_url")
+        curl -s -L -o "$filename" "$latest_url" || { color_msg "red" "Error: Failed to download VPKEdit\n" "bold"; exit 1; }
+        unzip -o "$filename" &>/dev/null || { color_msg "red" "Error: Failed to unzip VPKEdit\n" "bold"; exit 1; }
+        rm -f "$filename"
+
+        # Update timestamp file with current time
+        echo "$current_time" > "$timestamp_file"
+    fi
 }
 
 shorten_path() {
@@ -356,7 +428,7 @@ if [ "$autodetect" -eq 1 ]; then
     steampath="$game_folder"
 
     if [ -n "$steampath" ]; then
-        bsp_path="$steampath/download/maps"
+        path_bsp="$steampath/download/maps"
         steampath="$steampath/download"
         color_msg "green" "Game folder set to '${steampath##*/common/}'\n"
     else
@@ -364,19 +436,21 @@ if [ "$autodetect" -eq 1 ]; then
         exit 1
     fi
 else
-    steampath="$output_path"
+    steampath="$path_output"
     color_msg "yellow" "Manual Mode Selected\n"
 fi
 
 # Init
 color_msg "green" "Initializing...\n" "bold"
 [ -z "$TERM" ] && export TERM="xterm"
-mkdir -p "$bsp_path"
-mkdir -p "$data_path"
-rm -rf "$data_path"/* || { color_msg "red" "Error: Failed to clean $data_path\n" "bold"; exit 1; }
+mkdir -p "$path_bsp"
+mkdir -p "$path_data"
+mkdir -p "$path_log"
+rm -rf "$path_data"/* || { color_msg "red" "Error: Failed to clean $path_data\n" "bold"; exit 1; }
+rm -rf "$path_log"/* || { color_msg "red" "Error: Failed to clean $path_log\n" "bold"; exit 1; }
 if [ "$autodetect" -eq 0 ]; then
-    mkdir -p "$output_path"
-    rm -rf "$output_path"/* || { color_msg "red" "Error: Failed to clean $output_path\n" "bold"; exit 1; }
+    mkdir -p "$path_output"
+    rm -rf "$path_output"/* || { color_msg "red" "Error: Failed to clean $path_output\n" "bold"; exit 1; }
 fi
 sleep 1
 
@@ -384,14 +458,14 @@ sleep 1
 clear
 show_logo
 
-mapfile -t bsp_files < <(find -L "$bsp_path" -maxdepth 1 -type f -iname "*.bsp" | sort)
+mapfile -t bsp_files < <(find -L "$path_bsp" -maxdepth 1 -type f -iname "*.bsp" | sort)
 bsp_total=${#bsp_files[@]}
 
 if [ "$bsp_total" -eq 0 ]; then
-    color_msg "red" "Error: No Map files (bsp) found in '$bsp_path'\n" "bold"
+    color_msg "red" "Error: No Map files (bsp) found in '$path_bsp'\n" "bold"
     exit 1
 else  
-    color_msg "green" "=> $bsp_total maps found in '$(shorten_path "$bsp_path")'\n"
+    color_msg "green" "=> $bsp_total maps found in '$(shorten_path "$path_bsp")'\n"
     color_msg "green" "=> Output path '$(shorten_path "$steampath")'\n\n"
     if [[ -d "$steampath/materials" || -d "$steampath/models" || -d "$steampath/sound" ]]; then
         color_msg "yellow" "WARNING: Merging into existing game 'materials/models/sound' data!\n" "bold"
@@ -403,6 +477,7 @@ else
 
     declare -i start_time=$(date +%s)
     process_bsp
+    sleep 1
 fi
 
 # Finish up
@@ -412,7 +487,7 @@ declare -i minutes=$((total_seconds / 60))
 declare -i seconds=$((total_seconds % 60))
 
 color_msg "white" "\nCleaning up...\n\n"
-rm -rf "$data_path"/* || { color_msg "red" "Error: Failed to clean $data_path\n" "bold"; exit 1; }
+rm -rf "$path_data"/* || { color_msg "red" "Error: Failed to clean $path_data\n" "bold"; exit 1; }
 
 color_msg "bgreen" "=> SUCCESS! $bsp_processed Maps Processed in ${minutes}m ${seconds}s\n" "bold"
 if [ "$autodetect" -eq 0 ]; then
