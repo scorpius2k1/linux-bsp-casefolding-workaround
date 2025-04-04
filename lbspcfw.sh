@@ -7,7 +7,7 @@
 # License : https://www.gnu.org/licenses/gpl-3.0.en.html#license-text
 #
 
-version="1.01"
+version="1.02"
 logo="$(cat <<EOF
   _ _                     __          
  | | |                   / _|         
@@ -24,6 +24,7 @@ declare path_bsp="$PWD/bsp"
 declare path_data="$PWD/.data"
 declare path_output="$PWD/fix"
 declare path_log="$PWD/log"
+declare path_run_log="$PWD/log/run.log"
 declare vpkeditcli="$PWD/vpkeditcli"
 declare dependencies=(curl unzip rsync parallel)
 declare -i bsp_processed=0
@@ -447,7 +448,7 @@ mkdir -p "$path_bsp"
 mkdir -p "$path_data"
 mkdir -p "$path_log"
 rm -rf "$path_data"/* || { color_msg "red" "Error: Failed to clean $path_data\n" "bold"; exit 1; }
-rm -rf "$path_log"/* || { color_msg "red" "Error: Failed to clean $path_log\n" "bold"; exit 1; }
+find "$path_log"/* ! -name 'run.log' -type f -exec rm -f {} + || { color_msg "red" "Error: Failed to clean $path_log\n" "bold"; exit 1; }
 if [ "$autodetect" -eq 0 ]; then
     mkdir -p "$path_output"
     rm -rf "$path_output"/* || { color_msg "red" "Error: Failed to clean $path_output\n" "bold"; exit 1; }
@@ -458,13 +459,19 @@ sleep 1
 clear
 show_logo
 
-mapfile -t bsp_files < <(find -L "$path_bsp" -maxdepth 1 -type f -iname "*.bsp" | sort)
+date_last_success="$(grep -s "Success: @" "$path_log/run.log" | grep -os "@[0-9]\+" | tail -1)"
+[[ -z "$date_last_success" || ! ("$date_last_success" =~ [^[:space:]]) ]] && date_last_success="@0"
+mapfile -t bsp_files < <(find -L "$path_bsp" -maxdepth 1 -type f -iname "*.bsp" -newermt "$date_last_success" | sort)
 bsp_total=${#bsp_files[@]}
 
-if [ "$bsp_total" -eq 0 ]; then
+if [ "$bsp_total" -eq 0 ] && [ ! -z "$(ls -A "$steampath")" ]; then
+    color_msg "white" "All map files are up to date\n" "bold"
+    echo "Success: @$(date +%s)" >> "$path_log/run.log"
+    exit 0
+elif [ "$bsp_total" -eq 0 ]; then
     color_msg "red" "Error: No Map files (bsp) found in '$path_bsp'\n" "bold"
     exit 1
-else  
+else
     color_msg "green" "=> $bsp_total maps found in '$(shorten_path "$path_bsp")'\n"
     color_msg "green" "=> Output path '$(shorten_path "$steampath")'\n\n"
     if [[ -d "$steampath/materials" || -d "$steampath/models" || -d "$steampath/sound" ]]; then
@@ -486,8 +493,11 @@ declare -i total_seconds=$((end_time - start_time))
 declare -i minutes=$((total_seconds / 60))
 declare -i seconds=$((total_seconds % 60))
 
+echo "Success: @$end_time" >> "$path_log/run.log"
+
 color_msg "white" "\nCleaning up...\n\n"
 rm -rf "$path_data"/* || { color_msg "red" "Error: Failed to clean $path_data\n" "bold"; exit 1; }
+echo "$(tail -n 100 "$path_log/run.log")" > "$path_log/run.log" # limit run.log to 100 lines
 
 color_msg "bgreen" "=> SUCCESS! $bsp_processed Maps Processed in ${minutes}m ${seconds}s\n" "bold"
 if [ "$autodetect" -eq 0 ]; then
@@ -496,6 +506,5 @@ if [ "$autodetect" -eq 0 ]; then
     color_msg "bmagenta" "into desired Steam Game download path\n"
     color_msg "white" " Ex. '../Steam/steamapps/common/Half Life 2/download/'\n\n"
     color_msg "magenta" " >> Data must be copied to game download path (custom folder does not work) <<\n\n"
-    
 fi
 printf '\n'
