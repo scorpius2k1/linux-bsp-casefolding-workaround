@@ -7,7 +7,7 @@
 # License : https://www.gnu.org/licenses/gpl-3.0.en.html#license-text
 #
 
-version="1.01"
+version="1.02"
 logo="$(cat <<EOF
   _ _                     __          
  | | |                   / _|         
@@ -22,12 +22,14 @@ EOF
 
 declare path_bsp="$PWD/bsp"
 declare path_data="$PWD/.data"
-declare path_output="$PWD/fix"
+declare path_manual="$PWD/fix"
 declare path_log="$PWD/log"
+declare path_hash="$PWD/hash"
 declare vpkeditcli="$PWD/vpkeditcli"
 declare dependencies=(curl unzip rsync parallel)
 declare -i bsp_processed=0
 declare -i autodetect=0
+declare -i skip_processed=0
 
 prompt() {
     while true; do
@@ -195,10 +197,15 @@ game_folder() {
 }
 
 process_bsp() {
+
     local bsp=""
     local -i failed
-    local -a cursors=("/" "-" "\\" "|")
     local -i cursor_index=0
+    local -i max_jobs=$(( $(nproc) / 2 ))
+    local -a cursors=("/" "-" "\\" "|")
+    local -a hash_new
+    local -a map_hash
+    local -A hash_seen
 
     # Ensure variables are exported for parallel
     export vpkeditcli="$vpkeditcli"
@@ -211,56 +218,85 @@ process_bsp() {
     mkfifo "$fifo"
     trap 'rm -f "$fifo"' EXIT
 
+    # Set hash file
+    path_hash="$path_hash/hash.dat"
+
+    # Load hash array from file
+    if [ "$skip_processed" -eq 1 ]; then
+        if [ -f "$path_hash" ]; then
+            while IFS= read -r line; do
+                [[ -n "$line" ]] && map_hash+=("$line") && hash_seen["$line"]=1 # Add only non-empty lines
+            done < "$path_hash" 2>/dev/null
+        fi
+    fi
+
     # Only adjust ulimit if necessary
     [ "$(ulimit -n)" -lt 8192 ] && ulimit -n 8192
+
+    # Optimize max jobs I/O
+    [ "$max_jobs" -lt 4 ] && max_jobs=4
+    [ "$max_jobs" -gt 12 ] && max_jobs=12
 
     color_msg "blue" "Initializing..." "bold"
     
     # Run vpkeditcli and rsync in parallel, streaming results to FIFO
-    parallel --jobs $(nproc) --load 90% --memfree 512M --keep-order --line-buffer --quote sh -c '
+    export -f check_hash
+    export skip_processed
+    export map_hash_array=$(IFS=' '; echo "${map_hash[*]}")
+
+    parallel --tmpdir "$path_data/tmp" --jobs $max_jobs --line-buffer --keep-order --quote bash -c '
         bsp="$1"
         bsp_name=$(basename "$bsp")
-        echo "Debug: bsp=$bsp" >&2
-        if "$vpkeditcli" --no-progress --output "$path_data" --extract / "$bsp" 2> "$path_log/${bsp_name}.log"; then
-            echo "Debug: Extraction succeeded for $bsp" >&2
+        echo "=> Processing $bsp" >&2
+        [ $skip_processed -eq 1 ] && IFS=" " read -r -a map_hash <<< "$map_hash_array"
+        if matched_hash=$(check_hash "$bsp" "${map_hash[@]}"); then
+            echo "Skipping $bsp_name, previously processed (hash: $matched_hash)" >&2
+            echo "SKIPPED: $bsp"
+        elif "$vpkeditcli" --no-progress --output "$path_data" --extract / "$bsp" 2> "$path_log/${bsp_name}.log"; then
+            echo "Extraction succeeded for $bsp_name" >&2
             materials="$path_data/${bsp_name%.*}/materials"
             models="$path_data/${bsp_name%.*}/models"
             sound="$path_data/${bsp_name%.*}/sound"
             [ -d "$materials" ] && rsync -aAHX "$materials" "$steampath"
             [ -d "$models" ] && rsync -aAHX "$models" "$steampath"
             [ -d "$sound" ] && rsync -aAHX "$sound" "$steampath"
-            echo "Debug: Sync completed for $bsp" >&2
+            echo "Successfully synchronized extracted data for $bsp_name" >&2
+            echo "Completed processing for $bsp_name" >&2
             rm -f "$path_log/${bsp_name}.log"
             echo "SUCCESS: $bsp"
         else
-            echo "Debug: Extraction failed for $bsp" >&2
+            echo "Failed extraction for $bsp_name" >&2
             echo "FAILED: $bsp"
         fi
-    ' sh ::: "${bsp_files[@]}" > "$fifo" 2> "$path_log/process.log" &
+    ' bash ::: "${bsp_files[@]}" > "$fifo" 2> "$path_log/process.log" &
 
     local parallel_pid=$!
 
     # Process FIFO output
     while IFS= read -r result || [ -n "$result" ]; do
-        bsp=""
-        failed=0
-        if [[ "$result" =~ ^FAILED:\ (.+)$ ]]; then
-            bsp="${BASH_REMATCH[1]}"
-            failed=1
-        elif [[ "$result" =~ ^SUCCESS:\ (.+)$ ]]; then
-            bsp="${BASH_REMATCH[1]}"
+        state=0
+        if [[ "$result" =~ ^SUCCESS:\ (.+)$ ]]; then
+            state=0
+        elif [[ "$result" =~ ^SKIPPED:\ (.+)$ ]]; then
+            state=1
+        elif [[ "$result" =~ ^FAILED:\ (.+)$ ]]; then
+            state=2
         else
             continue
         fi
 
+        bsp="${BASH_REMATCH[1]}"
         local cursor="${cursors[cursor_index]}"
         local bsp_name=$(basename "$bsp")
         ((cursor_index = (cursor_index + 1) % 4))
         ((bsp_processed++))
 
-        color_msg "blue" "\r\033[K [$cursor] Processing Maps $bsp_processed/$bsp_total $(((bsp_processed) * 100 / bsp_total))%% \033[36m${bsp_name%.*}..." "bold"
-
-        if [ "$failed" -eq 1 ]; then
+        if [ "$state" -eq 0 ]; then
+            color_msg "blue" "\r\033[K [$cursor] Processing Maps $bsp_processed/$bsp_total $(((bsp_processed) * 100 / bsp_total))%% \033[36m${bsp_name%.*}..." "bold"
+            [ "$skip_processed" -eq 1 ] && map_hash+=("$(stat --format="%d %s %Y %Z %n" "$bsp" | sha1sum | awk '{print $1}')")
+        elif [ "$state" -eq 1 ]; then
+            color_msg "blue" "\r\033[K [$cursor] Processing Maps $bsp_processed/$bsp_total $(((bsp_processed) * 100 / bsp_total))%% \033[35mSkipping ${bsp_name%.*} (already processed)..." "bold"
+        elif [ "$state" -eq 2 ]; then
             color_msg "yellow" "Warning: Failed to extract '$bsp_name', skipping. Check error log at $path_log/${bsp_name}.log"
             sleep 1
         fi
@@ -270,6 +306,91 @@ process_bsp() {
     printf "\n"
 
     rm -rf $fifo
+
+    if [ "$skip_processed" -eq 1 ]; then
+        for hash in "${map_hash[@]}"; do
+            [[ -z "${hash_seen[$hash]}" ]] && echo "$hash" >> "$path_hash"
+        done
+    fi
+}
+
+# Function to check if hash exists in log file
+check_hash() {
+    if [[ "$skip_processed" -eq 0 ]]; then return 1; fi
+
+    local filename="$1"
+    shift  # Remove $1 (filename) from the arguments
+    local hashes=("$@")  # Capture remaining arguments (map_hash elements) as an array
+
+    # Check if filename is provided
+    [ -z "$filename" ] && return 1
+
+    # Check if file exists
+    [ ! -f "$filename" ] && return 1
+
+    # Calculate hash
+    local hash
+    hash=$(stat --format="%d %s %Y %Z %n" "$filename" | sha1sum | awk '{print $1}')
+
+    # Check if hash exists in the array
+    for stored_hash in "${hashes[@]}"; do
+        if [[ "$stored_hash" == "$hash" ]]; then
+            echo "$stored_hash"  # Output the matched hash to stdout
+            return 0  # Found
+        fi
+    done
+
+    return 1  # Not found
+}
+
+store_hash() {
+    local filename="$1"
+    local hash_file="$2"
+
+    # Check if filename is provided
+    if [ -z "$filename" ]; then return 1; fi
+    
+    # Check if file exists
+    if [ ! -f "$filename" ]; then return 1; fi
+   
+    # Calculate hash sum
+    local hash=$(stat --format="%d %s %Y %Z %n" "$bsp" | sha1sum | awk '{print $1}')
+
+    # Check if log file exists and if md5 already exists in it
+    if [ -f "$hash_file" ]; then
+        if grep -q "^$hash$" "$hash_file"; then
+            return 0  # hash already exists, no action needed
+        fi
+    fi
+
+    # Append new hash to log file
+    echo "$hash" >> "$hash_file" || {
+        echo "Error: Could not write to log file"
+        return 1
+    }
+}
+
+shorten_path() {
+    local path="$1"
+    local depth=5
+
+    IFS='/' read -r -a segments <<< "$path"
+
+    local total=${#segments[@]}
+
+    if [ "$total" -le "$depth" ]; then
+        echo "$path"
+        return
+    fi
+
+    local start=$((total - depth))
+
+    local short=".."
+    for ((i = start; i < total; i++)); do
+        short="$short/${segments[i]}"
+    done
+
+    echo "$short"
 }
 
 get_latest_vpk() {
@@ -390,6 +511,10 @@ fi
 color_msg "white" "\nAttempt to auto-detect game folders/maps? [Y/n] " "bold"
 autodetect=$(prompt)
 
+color_msg "white" "\nSkip previously processed maps? [Y/n] " "bold"
+skip_processed=$(prompt)
+
+
 if [ "$autodetect" -eq 1 ]; then
 
     check_steampath
@@ -435,8 +560,12 @@ if [ "$autodetect" -eq 1 ]; then
         color_msg "red" "Error: Failed to validate game, exiting.\n\n" "bold"
         exit 1
     fi
+
+    path_hash="$path_hash/$(basename "${folder_array[$choice]}")"
+    
 else
-    steampath="$path_output"
+    steampath="$path_manual"
+    path_hash="$path_hash/manual"
     color_msg "yellow" "Manual Mode Selected\n"
 fi
 
@@ -446,11 +575,13 @@ color_msg "green" "Initializing...\n" "bold"
 mkdir -p "$path_bsp"
 mkdir -p "$path_data"
 mkdir -p "$path_log"
+mkdir -p "$path_hash"
 rm -rf "$path_data"/* || { color_msg "red" "Error: Failed to clean $path_data\n" "bold"; exit 1; }
 rm -rf "$path_log"/* || { color_msg "red" "Error: Failed to clean $path_log\n" "bold"; exit 1; }
+mkdir -p "$path_data/tmp"
 if [ "$autodetect" -eq 0 ]; then
-    mkdir -p "$path_output"
-    rm -rf "$path_output"/* || { color_msg "red" "Error: Failed to clean $path_output\n" "bold"; exit 1; }
+    mkdir -p "$path_manual"
+    rm -rf "$path_manual"/* || { color_msg "red" "Error: Failed to clean $path_manual\n" "bold"; exit 1; }
 fi
 sleep 1
 
