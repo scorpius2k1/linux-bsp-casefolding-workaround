@@ -19,6 +19,7 @@ BSP map files reference assets (e.g., Materials/Walls/brick01.vtf) case-insensit
 - Extracts custom map assets with vpkeditcli and merges them together with rsync
 - Uses [GNU Parallel](https://github.com/gitGNU/gnu_parallel) for processing all map data, drastically reducing workload time
 - Syncronization can be set to your game folder (auto-detect), or `fix` folder (manually copy contents to game `download` folder)
+- Optionally skip previously processed maps per game using hash fingerprinting for accurate checking (new, changed, same, etc)
 
 ## 🚀 Usage
 ### Prerequisites
