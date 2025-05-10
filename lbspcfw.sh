@@ -7,7 +7,7 @@
 # License : https://www.gnu.org/licenses/gpl-3.0.en.html#license-text
 #
 
-version="1.02"
+version="1.03"
 logo="$(cat <<EOF
   _ _                     __          
  | | |                   / _|         
@@ -20,43 +20,34 @@ logo="$(cat <<EOF
 EOF
 )"
 
+declare path_script="$(dirname "$(realpath "$0")")"
+cd "$path_script"
+
 declare path_bsp="$PWD/bsp"
 declare path_data="$PWD/.data"
 declare path_manual="$PWD/fix"
 declare path_log="$PWD/log"
 declare path_hash="$PWD/hash"
+declare path_config="$PWD/cfg"
 declare vpkeditcli="$PWD/vpkeditcli"
 declare dependencies=(curl unzip rsync parallel)
 declare -i bsp_processed=0
 declare -i autodetect=0
 declare -i skip_processed=0
+declare -i use_config=0
 
 prompt() {
+    local default_value="${1,,}"
+    local default_response=$([[ -z "$default_value" ]] && echo "1" || { [[ "$default_value" == "n" ]] && echo "0" || echo "1"; })
+
     while true; do
         read -p "" response
         case "${response,,}" in
-            Y|y|"") printf '1\n'; return ;;
-            N|n) printf '0\n'; return ;;
-            *) printf '%s\n' "$response"; return ;;
+            y) echo '1'; return ;;
+            n) echo '0'; return ;;
+            *) echo "$default_response"; return ;;
         esac
     done
-}
-
-checkdeps() {
-	local missing=0
-
-	for app in "${dependencies[@]}"
-	do
-		if ! command -v $app &> /dev/null
-		then
-			color_msg "red" "=> dependency '$app' is required, but not installed.\n" "bold"
-			missing=1
-		fi
-	done
-	if [ $missing -eq 1 ]; then
-		echo -e "\nPlease check your distribution's documentation for further instructions.\n"
-		exit 1
-	fi
 }
 
 color_msg() {
@@ -98,13 +89,101 @@ color_msg() {
     printf "$style_code$color_code$text\033[0m"
 }
 
+checkdeps() {
+    local missing=0
+
+    for app in "${dependencies[@]}"; do
+        if ! command -v "$app" &>/dev/null; then
+            color_msg "red" "=> dependency '$app' is required, but not installed.\n" "bold"
+            missing=1
+        fi
+    done
+    if [ "$missing" -eq 1 ]; then
+        echo "Please check your distribution's documentation for further instructions."
+        exit 1
+    fi
+}
+
+checkupdate() {
+    local repo_url="https://github.com/scorpius2k1/linux-bsp-casefolding-workaround.git"
+    local latest_tag="https://api.github.com/repos/scorpius2k1/linux-bsp-casefolding-workaround/releases/latest"
+    local latest="$(curl -s "$latest_tag" | grep '"tag_name":' | sed -E 's/.*"tag_name": "v?([0-9.]+)".*/\1/')"
+    local path_update="$path_script/.update"
+
+    if [ -n "$latest" ] && [ "$(printf '%s\n' "$version" "$latest" | sort -V | tail -n1)" = "$latest" ] && [ "$version" != "$latest" ]; then
+        color_msg "white" "A newer version of LBSPCFW is available ($latest), update now? [Y/n] " "bold"
+        if [ $(prompt) -eq 1 ]; then
+            rm -rf "$path_update"
+            if ! git clone "$repo_url" "$path_update" > /dev/null 2>&1; then
+                color_msg "red" "Error: Failed to clone repository" "bold" >&2
+                exit 1
+            else
+                rsync -aAHX "$path_update/" "$path_script"
+                rm -rf "$path_update" 
+                chmod +x "$path_script/lbspcfw.sh"
+
+                color_msg "green" "Update successful, restarting script..."
+                sleep 2
+                exec "$(realpath "$0")" "$@"
+            fi
+        fi
+    fi
+}
+
+checkvpk() {
+    local repo_url="https://api.github.com/repos/craftablescience/VPKEdit/releases/latest"
+    local vpkedit_file="vpkedit"
+    local timestamp_file=".vpkedit"
+    local download_needed=1
+    local current_time=$(date +%s)
+
+    if [ -f "$vpkedit_file" ] && [ -f "$timestamp_file" ]; then
+        local last_modified=$(cat "$timestamp_file" 2>/dev/null)
+        if [ -n "$last_modified" ]; then
+            local time_diff=$((current_time - last_modified))
+            if [ "$time_diff" -lt 604800 ]; then
+                download_needed=0
+                return 0
+            fi
+        fi
+    fi
+
+    if [ "$download_needed" -eq 1 ]; then
+        color_msg "white" "Updating 'vpkedit' to latest release\n(https://github.com/craftablescience/VPKEdit)..."
+        printf "\n"
+        local latest_url=$(curl -s $repo_url \
+            | grep "browser_download_url.*.zip" \
+            | grep "Linux-Binaries" \
+            | cut -d '"' -f 4)
+        if [ -z "$latest_url" ]; then
+            color_msg "red" "Error: Failed to fetch latest VPKEdit release URL\n" "bold"
+            exit 1
+        fi
+        local filename=$(basename "$latest_url")
+        curl -s -L -o "$filename" "$latest_url" || { color_msg "red" "Error: Failed to download VPKEdit\n" "bold"; exit 1; }
+
+        if ! unzip -t "$filename" &>/dev/null; then
+            color_msg "red" "Error: Downloaded VPKEdit archive is corrupt\n" "bold"
+            exit 1
+        fi
+        
+        unzip -o "$filename" &>/dev/null || { color_msg "red" "Error: Failed to unzip VPKEdit\n" "bold"; exit 1; }
+        rm -f "$filename"
+
+        echo "$current_time" > "$timestamp_file"
+    fi
+
+    if [ ! -f "$vpkeditcli" ] || [ ! -x "$vpkeditcli" ]; then
+        color_msg "red" "Error: '$vpkeditcli' not found or not executable. Please check the path and permissions.\n" "bold"
+        exit 1
+    fi    
+}
+
 game_root() {
     local search_path="${1%/}"
     local -a folders=()
-    local -i i=0
 
     if [ ! -d "$search_path" ]; then
-        printf '\n'
         return 1
     fi
 
@@ -112,12 +191,10 @@ game_root() {
         local folder_name=$(basename "$folder")
         if [[ -d "$folder" && "$folder" != "$search_path" && ! "${folder_name,,}" =~ proton && ! "${folder_name,,}" =~ steam ]]; then
             folders+=("$folder")
-            ((i++))
         fi
     done < <(find "$search_path" -maxdepth 1 -type d -print0 2>/dev/null)
 
     if [ ${#folders[@]} -eq 0 ]; then
-        printf '\n'
         return 1
     fi
 
@@ -126,8 +203,6 @@ game_root() {
 
 game_folder() {
     local root_path="${1%/}"
-
-    # Validate root path
     if [ ! -d "$root_path" ]; then
         printf "Error: '%s' is not a valid directory\n" "$root_path" >&2
         return 1
@@ -137,16 +212,11 @@ game_folder() {
     local current_parent=""
     declare -A found_items
 
-    # Use find to get only direct children (maxdepth 1) of each parent
     while IFS= read -r -d '' item; do
-        local parent
-        parent=$(dirname "$item")
-        local item_name
-        item_name=$(basename "$item")
+        local parent=$(dirname "$item")
+        local item_name=$(basename "$item")
 
-        # Only proceed if this is a new parent directory
         if [ "$parent" != "$current_parent" ]; then
-            # Check if all targets were found in the previous parent
             if [ -n "$current_parent" ]; then
                 local all_found=1
                 for target in "${validate[@]}"; do
@@ -160,12 +230,10 @@ game_folder() {
                     return 0
                 fi
             fi
-            # Reset found_items for the new parent
             declare -A found_items
             current_parent="$parent"
         fi
 
-        # Only consider direct children of current_parent
         if [ "$(dirname "$item")" = "$current_parent" ]; then
             for target in "${validate[@]}"; do
                 if [ "${item_name,,}" = "${target,,}" ]; then
@@ -178,7 +246,6 @@ game_folder() {
         fi
     done < <(find "$root_path" -maxdepth 2 -print0 2>/dev/null)
 
-    # Final check for the last parent
     if [ -n "$current_parent" ]; then
         local all_found=1
         for target in "${validate[@]}"; do
@@ -197,59 +264,54 @@ game_folder() {
 }
 
 process_bsp() {
-
-    local bsp=""
-    local -i failed
     local -i cursor_index=0
     local -i max_jobs=$(( $(nproc) / 2 ))
     local -a cursors=("/" "-" "\\" "|")
-    local -a hash_new
     local -a map_hash
     local -A hash_seen
+    local hash_parallel=""
 
-    # Ensure variables are exported for parallel
     export vpkeditcli="$vpkeditcli"
     export path_data="$path_data"
     export steampath="$steampath"
     export path_log="$path_log"
 
-    # Create FIFO
     local fifo=$(mktemp -u)
     mkfifo "$fifo"
     trap 'rm -f "$fifo"' EXIT
 
-    # Set hash file
     path_hash="$path_hash/hash.dat"
 
-    # Load hash array from file
     if [ "$skip_processed" -eq 1 ]; then
         if [ -f "$path_hash" ]; then
             while IFS= read -r line; do
-                [[ -n "$line" ]] && map_hash+=("$line") && hash_seen["$line"]=1 # Add only non-empty lines
+                [[ -n "$line" ]] && map_hash+=("$line") && hash_seen["$line"]=1
             done < "$path_hash" 2>/dev/null
         fi
     fi
 
-    # Only adjust ulimit if necessary
     [ "$(ulimit -n)" -lt 8192 ] && ulimit -n 8192
 
-    # Optimize max jobs I/O
     [ "$max_jobs" -lt 4 ] && max_jobs=4
     [ "$max_jobs" -gt 12 ] && max_jobs=12
 
     color_msg "blue" "Initializing..." "bold"
-    
-    # Run vpkeditcli and rsync in parallel, streaming results to FIFO
-    export -f check_hash
-    export skip_processed
-    export map_hash_array=$(IFS=' '; echo "${map_hash[*]}")
+   
+    hash_parallel=$(declare -p hash_seen)
 
-    parallel --tmpdir "$path_data/tmp" --jobs $max_jobs --line-buffer --keep-order --quote bash -c '
+    export hash_parallel
+    export skip_processed
+    export -f hash_check
+    export -f hash_create
+
+    parallel --tmpdir "$path_data/tmp" --jobs $max_jobs --line-buffer --keep-order --quote bash -c '   
         bsp="$1"
         bsp_name=$(basename "$bsp")
+
+        eval "$hash_parallel"
+
         echo "=> Processing $bsp" >&2
-        [ $skip_processed -eq 1 ] && IFS=" " read -r -a map_hash <<< "$map_hash_array"
-        if matched_hash=$(check_hash "$bsp" "${map_hash[@]}"); then
+        if [ "$skip_processed" -eq 1 ] && matched_hash=$(hash_check hash_seen "$bsp"); then
             echo "Skipping $bsp_name, previously processed (hash: $matched_hash)" >&2
             echo "SKIPPED: $bsp"
         elif "$vpkeditcli" --no-progress --output "$path_data" --extract / "$bsp" 2> "$path_log/${bsp_name}.log"; then
@@ -271,8 +333,8 @@ process_bsp() {
     ' bash ::: "${bsp_files[@]}" > "$fifo" 2> "$path_log/process.log" &
 
     local parallel_pid=$!
-
-    # Process FIFO output
+    
+    map_hash=()
     while IFS= read -r result || [ -n "$result" ]; do
         state=0
         if [[ "$result" =~ ^SUCCESS:\ (.+)$ ]]; then
@@ -292,10 +354,10 @@ process_bsp() {
         ((bsp_processed++))
 
         if [ "$state" -eq 0 ]; then
-            color_msg "blue" "\r\033[K [$cursor] Processing Maps $bsp_processed/$bsp_total $(((bsp_processed) * 100 / bsp_total))%% \033[36m${bsp_name%.*}..." "bold"
-            [ "$skip_processed" -eq 1 ] && map_hash+=("$(stat --format="%d %s %Y %Z %n" "$bsp" | sha1sum | awk '{print $1}')")
+            color_msg "blue" "\r\033[K [$cursor] Processing $bsp_processed/$bsp_total ($((bsp_processed * 100 / bsp_total))%%) \033[36m${bsp_name%.*}..." "bold"
+            [ "$skip_processed" -eq 1 ] && map_hash+=("$(hash_create "$bsp")")
         elif [ "$state" -eq 1 ]; then
-            color_msg "blue" "\r\033[K [$cursor] Processing Maps $bsp_processed/$bsp_total $(((bsp_processed) * 100 / bsp_total))%% \033[35mSkipping ${bsp_name%.*} (already processed)..." "bold"
+            color_msg "blue" "\r\033[K [$cursor] Processing $bsp_processed/$bsp_total ($(((bsp_processed) * 100 / bsp_total))%%) \033[35mSkipping ${bsp_name%.*} (already processed)..." "bold"
         elif [ "$state" -eq 2 ]; then
             color_msg "yellow" "Warning: Failed to extract '$bsp_name', skipping. Check error log at $path_log/${bsp_name}.log"
             sleep 1
@@ -305,7 +367,7 @@ process_bsp() {
     wait "$parallel_pid"
     printf "\n"
 
-    rm -rf $fifo
+    rm -rf "$fifo"
 
     if [ "$skip_processed" -eq 1 ]; then
         for hash in "${map_hash[@]}"; do
@@ -314,164 +376,77 @@ process_bsp() {
     fi
 }
 
-# Function to check if hash exists in log file
-check_hash() {
-    if [[ "$skip_processed" -eq 0 ]]; then return 1; fi
+hash_check() {
+    [[ "$skip_processed" -eq 0 ]] && return 1
 
-    local filename="$1"
-    shift  # Remove $1 (filename) from the arguments
-    local hashes=("$@")  # Capture remaining arguments (map_hash elements) as an array
+    local -n hashes=$1
+    local filename="$2"
 
-    # Check if filename is provided
-    [ -z "$filename" ] && return 1
+    [[ -z "$filename" || ! -f "$filename" ]] && return 1
 
-    # Check if file exists
-    [ ! -f "$filename" ] && return 1
+    local hash=$(hash_create "$filename")
 
-    # Calculate hash
-    local hash
-    hash=$(stat --format="%d %s %Y %Z %n" "$filename" | sha1sum | awk '{print $1}')
-
-    # Check if hash exists in the array
-    for stored_hash in "${hashes[@]}"; do
-        if [[ "$stored_hash" == "$hash" ]]; then
-            echo "$stored_hash"  # Output the matched hash to stdout
-            return 0  # Found
-        fi
-    done
-
-    return 1  # Not found
-}
-
-store_hash() {
-    local filename="$1"
-    local hash_file="$2"
-
-    # Check if filename is provided
-    if [ -z "$filename" ]; then return 1; fi
-    
-    # Check if file exists
-    if [ ! -f "$filename" ]; then return 1; fi
-   
-    # Calculate hash sum
-    local hash=$(stat --format="%d %s %Y %Z %n" "$bsp" | sha1sum | awk '{print $1}')
-
-    # Check if log file exists and if md5 already exists in it
-    if [ -f "$hash_file" ]; then
-        if grep -q "^$hash$" "$hash_file"; then
-            return 0  # hash already exists, no action needed
-        fi
+    if [[ ${hashes["$hash"]} -eq 1 ]]; then
+        echo "$hash"
+        return 0
     fi
 
-    # Append new hash to log file
-    echo "$hash" >> "$hash_file" || {
-        echo "Error: Could not write to log file"
-        return 1
-    }
+    return 1
+}
+
+hash_create() {
+    stat --format="%d %s %Y %Z %n" "$1" | sha1sum | awk '{print $1}'
 }
 
 shorten_path() {
     local path="$1"
-    local depth=5
+    local depth="${2:-5}"
+    local direction="${3:-last}"
+
+    path="${path#/}"
+    path="${path%/}"
 
     IFS='/' read -r -a segments <<< "$path"
-
     local total=${#segments[@]}
 
+    [ "$total" -eq 0 ] && { echo "$path"; return; }
+
     if [ "$total" -le "$depth" ]; then
-        echo "$path"
+        local result=""
+        for ((i=0; i<total; i++)); do
+            [ $i -eq 0 ] && result="${segments[i]}" || result="$result/${segments[i]}"
+        done
+        echo "/$result"
         return
     fi
 
-    local start=$((total - depth))
-
-    local short=".."
-    for ((i = start; i < total; i++)); do
-        short="$short/${segments[i]}"
-    done
-
-    echo "$short"
-}
-
-get_latest_vpk() {
-    local vpkedit_file="vpkedit"  # Adjust this to the actual extracted filename if different
-    local timestamp_file=".vpkedit"
-    local download_needed=1
-    local current_time=$(date +%s)
-    local last_modified
-    local time_diff
-
-    # Check if vpkedit exists and timestamp file exists
-    if [ -f "$vpkedit_file" ] && [ -f "$timestamp_file" ]; then
-        # Read the stored timestamp
-        last_modified=$(cat "$timestamp_file" 2>/dev/null)
-        if [ -n "$last_modified" ]; then
-            # Calculate time difference in seconds
-            time_diff=$((current_time - last_modified))
-            # 86400 seconds = 24 hours
-            if [ "$time_diff" -lt 86400 ]; then
-                download_needed=0
-                color_msg "white" "VPKEdit is up to date (last updated less than 24 hours ago)\n"
-                return 0
-            fi
-        fi
+    local short=""
+    if [ "$direction" = "first" ]; then
+        for ((i=0; i<depth; i++)); do
+            [ $i -eq 0 ] && short="${segments[i]}" || short="$short/${segments[i]}"
+        done
+        short="$short/..."
+    else
+        local start=$((total - depth))
+        short="..."
+        for ((i=start; i<total; i++)); do
+            short="$short/${segments[i]}"
+        done
     fi
-
-    # If we need to download (either file doesn't exist or is older than 24 hours)
-    if [ "$download_needed" -eq 1 ]; then
-        color_msg "white" "Updating 'vpkedit' to latest release\n(https://github.com/craftablescience/VPKEdit)..."
-        printf "\n"
-        local latest_url
-        latest_url=$(curl -s https://api.github.com/repos/craftablescience/VPKEdit/releases/latest \
-            | grep "browser_download_url.*.zip" \
-            | grep "Linux-Binaries" \
-            | cut -d '"' -f 4)
-        if [ -z "$latest_url" ]; then
-            color_msg "red" "Error: Failed to fetch latest VPKEdit release URL\n" "bold"
-            exit 1
-        fi
-        local filename
-        filename=$(basename "$latest_url")
-        curl -s -L -o "$filename" "$latest_url" || { color_msg "red" "Error: Failed to download VPKEdit\n" "bold"; exit 1; }
-        unzip -o "$filename" &>/dev/null || { color_msg "red" "Error: Failed to unzip VPKEdit\n" "bold"; exit 1; }
-        rm -f "$filename"
-
-        # Update timestamp file with current time
-        echo "$current_time" > "$timestamp_file"
-    fi
-}
-
-shorten_path() {
-    local path="$1"
-    local depth=5
-
-    IFS='/' read -r -a segments <<< "$path"
-
-    local total=${#segments[@]}
-
-    if [ "$total" -le "$depth" ]; then
-        echo "$path"
-        return
-    fi
-
-    local start=$((total - depth))
-
-    local short=".."
-    for ((i = start; i < total; i++)); do
-        short="$short/${segments[i]}"
-    done
 
     echo "$short"
 }
 
 check_steampath() {
     local steamroot=(
-        "$HOME/.local/share/Steam/steamapps/common" # System
-        "$HOME/.steam/steam/steamapps/common" # System
-        "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common" # Flatpak
-        "$HOME/snap/steam/common/.local/share/Steam/steamapps/common" # Snap
+        "$HOME/.steam/debian-installation/steamapps/common"
+        "$HOME/.local/share/Steam/steamapps/common"
+        "$HOME/.steam/steam/steamapps/common"
+        "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common"
+        "$HOME/snap/steam/common/.local/share/Steam/steamapps/common"
     )
     local steamtype=(
+        "System"
         "System"
         "System"
         "Flatpak"
@@ -481,10 +456,175 @@ check_steampath() {
     for ((i = 0; i < ${#steamroot[@]}; i++)); do
         if [ -d "${steamroot[$i]}" ]; then
             steampath="${steamroot[$i]}"
-            color_msg "green" "${steamtype[$i]} Steam Install Detected\n\n"
+            color_msg "green" "${steamtype[$i]} Steam Install Detected\n"
             return 0
         fi
     done
+}
+
+find_steam_libraries() {
+    local array_name="$1"
+    if [ -z "$array_name" ]; then
+        return 1
+    fi
+
+    eval "declare -ag $array_name"
+    eval "$array_name=()"
+
+    local found_paths=()
+    while IFS=' ' read -r _ mount_point _; do
+        case "$mount_point" in
+            /proc*|/sys*|/dev*|/run*|/snap*|/var/lib/docker*|/tmp*) continue ;;
+        esac
+        [ -d "$mount_point" ] || continue
+        while IFS= read -r path; do
+            [ -n "$path" ] && found_paths+=("$path")
+        done < <(find "$mount_point" -type d -path "*/steamapps/common" 2>/dev/null)
+    done < /proc/mounts
+
+    while IFS= read -r path; do
+        [ -n "$path" ] && found_paths+=("$path")
+    done < <(find "$HOME" -type d -path "*/steamapps/common" 2>/dev/null)
+
+    declare -A unique_paths
+    for path in "${found_paths[@]}"; do
+        unique_paths["$path"]=1
+    done
+
+    for path in "${!unique_paths[@]}"; do
+        if find "$path" -maxdepth 1 -type d -not -path "$path" | read -r _; then
+            eval "$array_name+=(\"$path\")"
+        fi
+    done
+}
+
+checkconfig() {
+    local cfg_check=${1:-0}
+    local cfg_path="$path_config"
+    local -a cfg_files=()
+    local -A cfg_game_names=()
+
+    [ ! -d "$cfg_path" ] && { return 1; }
+
+    for file in "$cfg_path"/*; do
+        [ -f "$file" ] || continue
+        filename=$(basename "$file")
+        eval "$(parse_config "${cfg_path}/${filename}")"
+        cfg_game_names["$filename"]="${cfg_values[0]}"
+        cfg_files+=("$filename")
+    done
+
+    [ "$cfg_check" -eq 1 ] && { echo ${#cfg_files[@]}; return 0; }
+    [ ${#cfg_files[@]} -eq 0 ] && { return 1; }
+
+    local -a sorted_cfg_files=()
+    local -a manual_configs=()
+    for cfg in "${cfg_files[@]}"; do
+        if [ "${cfg_game_names[$cfg]}" = "Manual" ]; then
+            manual_configs+=("$cfg")
+        else
+            sorted_cfg_files+=("$cfg")
+        fi
+    done
+
+    sorted_cfg_files+=("${manual_configs[@]}")
+
+    color_msg "white" "Available Configs\n"
+    for i in "${!sorted_cfg_files[@]}"; do
+        eval "$(parse_config "${cfg_path}/${sorted_cfg_files[$i]}")"
+        color_msg "bblue" "$((i+1)): ${cfg_values[0]} ($(shorten_path "${cfg_values[1]}" "3" "first"))\n"
+    done
+
+    while true; do
+        color_msg "white" "\nWhich config to use (1-${#sorted_cfg_files[@]}): " "bold"
+        read -r choice
+        ((choice--))
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 0 ] && [ "$choice" -lt "${#sorted_cfg_files[@]}" ]; then
+            eval "$(parse_config "${cfg_path}/${sorted_cfg_files[$choice]}")"
+            path_hash="$path_hash/${cfg_values[0]}"
+            steampath="${cfg_values[1]}"
+            autodetect=${cfg_values[2]}
+            skip_processed=${cfg_values[3]}
+            use_config=1
+            break
+        else
+            color_msg "red" "Invalid choice, please select a number between 1 and ${#sorted_cfg_files[@]}.\n" "bold"
+        fi
+    done
+}
+
+parse_config() {
+    local cfg_file="$1"
+    local -a cfg_values=()
+
+    [ ! -f "$cfg_file" ] && { echo "Error: Config file '$cfg_file' not found" >&2; return 1; }
+
+    while IFS='=' read -r key value; do
+        [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
+
+        if [[ -n "$key" && -n "$value" ]]; then
+            key=$(echo "$key" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+            value=$(echo "$value" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+
+            value=${value%\"}
+            value=${value#\"}
+            value=${value%\'}
+            value=${value#\'}
+
+            cfg_values+=("$value")
+        fi
+    done < "$cfg_file"
+
+    [ ${#cfg_values[@]} -eq 0 ] && { echo "Error: No valid key-value pairs found in '$cfg_file'" >&2; return 1; }
+
+    declare -p cfg_values
+}
+
+saveconfig() {
+    local cfg_path="$1"
+    local cfg_steam="$2"
+    local cfg_auto="$3"
+    local cfg_skip="$4"
+    local cfg_game="$5"
+    local cfg_file="$6"
+    local cfg_date="$(date)"
+
+    [ ! -d "$cfg_path" ] && { return 1; }
+
+    cat <<-EOF > "$cfg_path/$cfg_file"
+	# $cfg_date
+	game="$cfg_game"
+	steampath="$cfg_steam"
+	autodetect="$cfg_auto"
+	skip_processed="$cfg_skip"
+	EOF
+}
+
+checkargs() {
+    ARGS="$#"
+    POSITIONAL_ARGS=()
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -c|--config)
+                use_config=1
+                shift
+                shift
+            ;;
+            -h|--help)
+                color_msg "white" "Usage: $0 [--config] [--help]\n\nLinux BSP Case Folding Workaround\n- Workaround for Valve Source1 engine games case folding issue on Linux\n- Options:\n  --config: Use a saved configuration\n  --help: Show this message\n"
+                exit 0
+            ;;            
+            -*|--*|*)
+                echo "Unknown option '$1'"
+                exit 0
+            ;;
+            *)
+                POSITIONAL_ARGS+=("$1")
+                shift
+            ;;
+        esac
+    done
+    set -- "${POSITIONAL_ARGS[@]}"
 }
 
 show_logo() {
@@ -494,98 +634,131 @@ show_logo() {
     color_msg "bcyan" "=======================================\n\n"
 }
 
-# Main script
-show_logo
-
-# Check dependencies
-checkdeps
-
-# Ensure vpkeditcli exists and is executable
-get_latest_vpk
-if [ ! -f "$vpkeditcli" ] || [ ! -x "$vpkeditcli" ]; then
-    color_msg "red" "Error: '$vpkeditcli' not found or not executable. Please check the path and permissions.\n" "bold"
-    exit 1
-fi
-
-# Config
-color_msg "white" "\nAttempt to auto-detect game folders/maps? [Y/n] " "bold"
-autodetect=$(prompt)
-
-color_msg "white" "\nSkip previously processed maps? [Y/n] " "bold"
-skip_processed=$(prompt)
-
-
-if [ "$autodetect" -eq 1 ]; then
-
-    check_steampath
-
-    if [ ! -d "$steampath" ]; then
-        color_msg "red" "Error: Steam path invalid or not found! ($steampath)\n" "bold"
-        color_msg "white" "=> Enter valid path to your Steam Games root path (../Steam/steamapps/common): " "bold"
-        read -r steampath
-        if [ ! -d "$steampath" ]; then
-            color_msg "red" "Error: No Steam Games found ($steampath), aborting.\n" "bold"
-            exit 1
-        fi
-    fi
-
-    mapfile -t folder_array < <(game_root "$steampath")
-    if [ $? -ne 0 ] || [ ${#folder_array[@]} -eq 0 ]; then
-        color_msg "red" "Failed to retrieve game folders! ($steampath)\n" "bold"
-        exit 1
-    fi
-
-    color_msg "white" "Available Games\n"
-    for i in "${!folder_array[@]}"; do
-        color_msg "bblue" "$((i+1)): ${folder_array[$i]##*/}\n"
-    done
-
-    color_msg "white" "\nWhich game to apply workaround (1-${#folder_array[@]}): " "bold"
-    read -r choice
-    ((choice--))
-    if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 0 ] || [ "$choice" -ge "${#folder_array[@]}" ]; then
-        color_msg "red" "Invalid choice, exiting.\n" "bold"
-        exit 1
-    fi
-
-    steampath="${folder_array[$choice]}"
-    game_folder=$(game_folder "$steampath")
-    steampath="$game_folder"
-
-    if [ -n "$steampath" ]; then
-        path_bsp="$steampath/download/maps"
-        steampath="$steampath/download"
-        color_msg "green" "Game folder set to '${steampath##*/common/}'\n"
-    else
-        color_msg "red" "Error: Failed to validate game, exiting.\n\n" "bold"
-        exit 1
-    fi
-
-    path_hash="$path_hash/$(basename "${folder_array[$choice]}")"
-    
-else
-    steampath="$path_manual"
-    path_hash="$path_hash/manual"
-    color_msg "yellow" "Manual Mode Selected\n"
-fi
-
 # Init
-color_msg "green" "Initializing...\n" "bold"
-[ -z "$TERM" ] && export TERM="xterm"
+show_logo
 mkdir -p "$path_bsp"
 mkdir -p "$path_data"
+mkdir -p "$path_manual"
 mkdir -p "$path_log"
 mkdir -p "$path_hash"
-rm -rf "$path_data"/* || { color_msg "red" "Error: Failed to clean $path_data\n" "bold"; exit 1; }
-rm -rf "$path_log"/* || { color_msg "red" "Error: Failed to clean $path_log\n" "bold"; exit 1; }
+mkdir -p "$path_config"
+
+checkdeps
+checkupdate
+checkvpk
+checkargs "$@"
+
+if [ "$use_config" -eq 0 ] && [ "$(checkconfig 1)" -ne 0 ]; then
+    color_msg "white" "Use configuration preset? [Y/n] " "bold"
+    use_config=$(prompt)
+fi
+
+if [ "$use_config" -eq 1 ]; then
+    checkconfig
+    [ "$autodetect" -eq 0 ] && steampath="$path_manual"
+    color_msg "white" "Skip previously processed maps? [Y/n] " "bold"
+    skip_processed=$(prompt)
+
+else
+    color_msg "white" "Attempt to auto-detect game folders/maps? [Y/n] " "bold"
+    autodetect=$(prompt)
+
+    if [ "$autodetect" -eq 1 ]; then
+        local -a steamexternal
+
+        show_logo
+        check_steampath
+
+        if [ ! -d "$steampath" ]; then
+            color_msg "red" "Error: Steam path invalid or not found! ($steampath)\n" "bold"
+            color_msg "white" "=> Enter valid path to your Steam Install root path (../Steam/steamapps/common): " "bold"
+            read -r steampath
+            if [ ! -d "$steampath" ]; then
+                color_msg "red" "Error: No Steam Install found ($steampath), aborting.\n" "bold"
+                exit 1
+            fi
+        fi
+
+        color_msg "bblue" "${steampath}\n"
+        color_msg "white" "\nSearch for additional Steam Libraries? [y/N] " "bold"
+        if [ $(prompt "n") -eq 1 ]; then
+            color_msg "white" "Searching for Steam Library folders..."   
+            find_steam_libraries steamexternal;
+
+            color_msg "white" "\n\nAvailable Steam Libraries:\n"
+            for i in "${!steamexternal[@]}"; do
+                color_msg "bblue" "$((i+1)): ${steamexternal[$i]}\n"
+            done
+
+            color_msg "white" "\nWhich library to use (1-${#steamexternal[@]}): " "bold"
+            read -r choice
+            ((choice--))
+            if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 0 ] || [ "$choice" -ge "${#steamexternal[@]}" ]; then
+                color_msg "red" "Invalid choice, exiting.\n" "bold"
+                exit 1
+            fi
+
+            steampath="${steamexternal[$choice]}"      
+        fi
+
+        mapfile -t gamepath < <(game_root "$steampath")
+        if [ "${#gamepath[@]}" -eq 0 ]; then
+            color_msg "red" "\nNo Steam Libraries found, exiting.\n" "bold"
+            exit 1
+        fi
+        
+        show_logo
+        color_msg "white" "Available Games\n"
+        for i in "${!gamepath[@]}"; do
+            color_msg "bblue" "$((i+1)): ${gamepath[$i]##*/}\n"
+        done
+
+        while true; do
+            color_msg "white" "\nWhich game to apply workaround (1-${#gamepath[@]}): " "bold"
+            read -r choice
+            ((choice--))
+            if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 0 ] && [ "$choice" -lt "${#gamepath[@]}" ]; then
+                steampath=$(game_folder "${gamepath[$choice]}")
+                if [ -n "$steampath" ]; then
+                    steampath="$steampath/download"
+                    color_msg "green" "Game set to '$(echo "${steampath##*/common/}" | cut -d'/' -f1)'\n\n"
+                    break
+                else
+                    color_msg "red" "Error: Failed to validate game, retrying.\n" "bold"
+                fi
+            else
+                color_msg "red" "Invalid choice, please select a number between 1 and ${#gamepath[@]}.\n" "bold"
+            fi
+        done
+
+        path_hash="$path_hash/$(basename "${gamepath[$choice]}")"
+    else
+        steampath="$path_manual"
+        path_hash="$path_hash/manual"
+        color_msg "yellow" "Manual Mode Selected\n"
+    fi
+
+    color_msg "white" "Skip previously processed maps? [Y/n] " "bold"
+    skip_processed=$(prompt)
+fi
+
+# Prepare environment
+color_msg "green" "Preparing Environment...\n" "bold"
+[ -z "$TERM" ] && export TERM="xterm"
+mkdir -p "$path_hash"
+mkdir -p "$steampath/maps"
+rm -rf "$path_data"/* || { color_msg "red" "Error: Failed to prepare $path_data\n" "bold"; exit 1; }
+rm -rf "$path_log"/* || { color_msg "red" "Error: Failed to prepare $path_log\n" "bold"; exit 1; }
 mkdir -p "$path_data/tmp"
-if [ "$autodetect" -eq 0 ]; then
+if [ "$autodetect" -eq 1 ]; then
+    path_bsp="$steampath/maps"
+else
     mkdir -p "$path_manual"
-    rm -rf "$path_manual"/* || { color_msg "red" "Error: Failed to clean $path_manual\n" "bold"; exit 1; }
+    rm -rf "$path_manual"/* || { color_msg "red" "Error: Failed to prepare $path_manual\n" "bold"; exit 1; }    
 fi
 sleep 1
 
-# Gather BSP files
+# Process
 clear
 show_logo
 
@@ -595,9 +768,9 @@ bsp_total=${#bsp_files[@]}
 if [ "$bsp_total" -eq 0 ]; then
     color_msg "red" "Error: No Map files (bsp) found in '$path_bsp'\n" "bold"
     exit 1
-else  
-    color_msg "green" "=> $bsp_total maps found in '$(shorten_path "$path_bsp")'\n"
-    color_msg "green" "=> Output path '$(shorten_path "$steampath")'\n\n"
+else
+    color_msg "green" "=> $bsp_total maps found in '$(shorten_path "$path_bsp" "3")'\n"
+    color_msg "green" "=> Output path '$(shorten_path "$steampath" "3")'\n\n"
     if [[ -d "$steampath/materials" || -d "$steampath/models" || -d "$steampath/sound" ]]; then
         color_msg "yellow" "WARNING: Merging into existing game 'materials/models/sound' data!\n" "bold"
         color_msg "yellow" "Ensure you have a backup of these folders before proceeding, if needed.\n\n"
@@ -611,14 +784,14 @@ else
     sleep 1
 fi
 
-# Finish up
+# Cleanup
 declare -i end_time=$(date +%s)
 declare -i total_seconds=$((end_time - start_time))
 declare -i minutes=$((total_seconds / 60))
 declare -i seconds=$((total_seconds % 60))
 
 color_msg "white" "\nCleaning up...\n\n"
-rm -rf "$path_data"/* || { color_msg "red" "Error: Failed to clean $path_data\n" "bold"; exit 1; }
+rm -rf "$path_data"/* || { color_msg "red" "Error: Failed to cleanup $path_data\n" "bold"; exit 1; }
 
 color_msg "bgreen" "=> SUCCESS! $bsp_processed Maps Processed in ${minutes}m ${seconds}s\n" "bold"
 if [ "$autodetect" -eq 0 ]; then
@@ -627,6 +800,10 @@ if [ "$autodetect" -eq 0 ]; then
     color_msg "bmagenta" "into desired Steam Game download path\n"
     color_msg "white" " Ex. '../Steam/steamapps/common/Half Life 2/download/'\n\n"
     color_msg "magenta" " >> Data must be copied to game download path (custom folder does not work) <<\n\n"
-    
+
+    saveconfig "$path_config" "$path_bsp" "$autodetect" "$skip_processed" "Manual" "$(hash_create "$path_bsp")"
+else
+    saveconfig "$path_config" "$steampath" "$autodetect" "$skip_processed" "$(echo "${steampath##*/common/}" | cut -d'/' -f1)" "$(hash_create "$steampath")"
 fi
+
 printf '\n'
