@@ -124,7 +124,7 @@ checkupdate() {
 
                 color_msg "green" "Update successful, restarting script..."
                 sleep 2
-                exec "$(realpath "$0")" "$@"
+                exec "$path_script/lbspcfw.sh" "$@"
             fi
         fi
     fi
