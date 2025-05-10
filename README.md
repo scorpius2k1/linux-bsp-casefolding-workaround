@@ -14,17 +14,18 @@ The Linux BSP Case Folding Workaround is a bash script designed to resolve clien
 BSP map files reference assets (e.g., Materials/Walls/brick01.vtf) case-insensitively, which conflicts with Linux case-sensitive filesystem (e.g., materials/walls/brick01.vtf) since the February 2025 update. This script automates bulk asset extraction, merge, and placement to ensure proper map operation.
 
 ## 👨‍💻 Functionality
-- Automatically downloads the latest [VPKEdit](https://github.com/craftablescience/VPKEdit/releases) for asset extraction.
+- Automatically updates to the latest LBSPCFW and [VPKEdit](https://github.com/craftablescience/VPKEdit/releases) (for asset extraction)
 - Auto-detection of compatible Steam Games (Flatpack & Snap also supported)
 - Extracts custom map assets with vpkeditcli and merges them together with rsync
 - Uses [GNU Parallel](https://github.com/gitGNU/gnu_parallel) for processing all map data, drastically reducing workload time
 - Syncronization can be set to your game folder (auto-detect), or `fix` folder (manually copy contents to game `download` folder)
 - Optionally skip previously processed maps per game using hash fingerprinting for accurate checking (new, changed, same, etc)
+- Automatic configuration preset generation to streamline reprocessing of new/existing map files on a per-game basis
 
 ## 🚀 Usage
 ### Prerequisites
-- Linux OS with bash.
-- Dependencies: **curl**, **unzip**, **rsync**, **parallel** (install via your distribution package manager, if needed).
+- Linux OS with bash
+- Dependencies: **curl**, **unzip**, **rsync**, **parallel** (install via your distribution package manager, if needed)
 
 Ubuntu/Debian-based (apt)
 ```
@@ -66,14 +67,20 @@ git clone https://github.com/scorpius2k1/linux-bsp-casefolding-workaround.git &&
   - Create a `bsp` folder in the same folder as the script
   - Copy desired map files (bsp) into the `bsp` folder
   - Run `./lbspcfw.sh` (select **N** to auto detect)
-  - Once the script has finished, move the contents of `fix` into game `download` folder<br/>(e.g., ../steamapps/common/Half-Life 2 Deathmatch/hl2mp/download/).
+  - Once the script has finished, move the contents of `fix` into game `download` folder<br/>(e.g., ../steamapps/common/Half-Life 2 Deathmatch/hl2mp/download/)
+- Presets:
+  - Configuration presets are automatically generated after first processing, on a per-game basis
+  - To use a preset, run the script normally and answer **Y** to the `Use configuration preset? [Y/n]` prompt and choose the desired game to reprocess
+  - Alternatively, the `--config` parameter can also be passed as a command line argument `./lbspcfw.sh --config` to skip directly to the preset menu
 
 #### ** Map files are **not altered** in any way, data is only extracted from them **
 ![Screenshot from 2025-03-08 10-50-46](https://github.com/user-attachments/assets/80e46bdb-a529-4859-9e6d-d646daace166)
 
-
 ## ⚠️ Backup Warning
 To work properly, all assets (materials, models, sound) extracted are **required** to be inside the game download folder (alternatively, they can be placed in the game root folder). Placing custom assets into the `custom` folder does not work since it seems to suffer the same case folding issue. This is due to the functionality of the game itself, _not_ the script. If you require any existing custom content to be retained, please back up your existing materials/models/sound folders **_prior_** to running this script.
+
+## 🚩 Known Issues
+Multiple maps that use the same texture/model naming scheme but different versions can potentially [conflict with eachother](https://github.com/scorpius2k1/linux-bsp-casefolding-workaround/issues/7), causing them not to render properly. While rare, this is difficult to address directly since the way Valve's Source1 engine processes external data cumulatively (no per-map option), making it implausible to address via a workaround such as this script.
 
 ## 🗑 Removal
 - Navigate to your game `download` folder and remove `materials` `models` `sound` folders. If you retained any backups of these folders, be sure to restore them there afterwards. Once done, restart the game.
