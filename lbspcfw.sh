@@ -35,6 +35,8 @@ declare -i bsp_processed=0
 declare -i autodetect=0
 declare -i skip_processed=0
 declare -i use_config=0
+declare -i daemon_mode=0
+declare -i silent_mode=0
 
 prompt() {
     local default_value="${1,,}"
@@ -608,6 +610,13 @@ checkargs() {
             -c|--config)
                 use_config=1
                 shift
+            ;;
+            --daemon|--monitor)
+                daemon_mode=1
+                shift
+            ;;
+            --silent)
+                silent_mode=1
                 shift
             ;;
             -h|--help)
@@ -634,6 +643,58 @@ show_logo() {
     color_msg "bcyan" "=======================================\n\n"
 }
 
+monitor_maps() {
+    local watch_path="$steampath/maps"
+    color_msg "green" "Starting background monitoring of: $watch_path\n" "bold"
+    
+    inotifywait -m -e close_write --format '%w%f' "$watch_path" 2>/dev/null | while read file; do
+        if [[ "$file" =~ \.bsp$ ]]; then
+            local bsp_name=$(basename "$file")
+            color_msg "blue" "New map detected: $bsp_name\n"
+            
+            # Check if already processed
+            if [ "$skip_processed" -eq 1 ] && hash_check hash_seen "$file"; then
+                color_msg "yellow" "Map already processed, skipping\n"
+                continue
+            fi
+            
+            # Process single map
+            process_single_bsp "$file"
+        fi
+    done
+}
+
+process_single_bsp() {
+    local bsp_file="$1"
+    local bsp_name=$(basename "$bsp_file")
+    
+    color_msg "blue" "Processing: $bsp_name\n" "bold"
+    
+    if "$vpkeditcli" --no-progress --output "$path_data" --extract / "$bsp_file" 2> "$path_log/${bsp_name}.log"; then
+        local materials="$path_data/${bsp_name%.*}/materials"
+        local models="$path_data/${bsp_name%.*}/models" 
+        local sound="$path_data/${bsp_name%.*}/sound"
+        
+        [ -d "$materials" ] && rsync -aAHX "$materials" "$steampath"
+        [ -d "$models" ] && rsync -aAHX "$models" "$steampath"
+        [ -d "$sound" ] && rsync -aAHX "$sound" "$steampath"
+        
+        if [ "$skip_processed" -eq 1 ]; then
+            local map_hash=$(hash_create "$bsp_file")
+            local hash_file="${path_hash_file:-$path_hash}"
+            echo "$map_hash" >> "$hash_file"
+            [[ ! -v hash_seen  ]] && declare -gA hash_seen
+            hash_seen["$map_hash"]=1
+        fi
+        
+        color_msg "green" "Successfully processed: $bsp_name\n" "bold"
+        rm -rf "$path_data/${bsp_name%.*}"
+        rm -f "$path_log/${bsp_name}.log"
+    else
+        color_msg "red" "Failed to process: $bsp_name\n" "bold"
+    fi
+}
+
 # Init
 show_logo
 mkdir -p "$path_bsp"
@@ -647,6 +708,74 @@ checkdeps
 checkupdate
 checkvpk
 checkargs "$@"
+
+# Check for daemon mode before any other processing, requires a configuration preset
+if [ "$daemon_mode" -eq 1 ]; then
+    if [ "$silent_mode" -eq 0 ]; then
+        if [ "$(checkconfig 1)" -ne 0 ]; then
+            color_msg "white" "Use configuration preset for daemon mode? [Y/n] " "bold"
+            if [ $(prompt) -eq 1 ]; then
+                checkconfig
+            else
+                color_msg "red" "Error: Daemon mode requires a configuration preset\n" "bold"
+                exit 1
+            fi
+        else
+            color_msg "red" "Error: No configuration presets found. Run the script normally first to create one.\n" "bold"
+            exit 1
+        fi
+    else 
+        if [ "$(checkconfig 1)" -ne 0 ]; then
+            local cfg_path="$path_config"
+            local first_cfg=$(find "$cfg_path" -maxdepth 1 -type f | head -n 1)
+
+            if [ -n "$first_cfg" ]; then
+                eval "$(parse_config "$first_cfg")"
+                steampath="${cfg_values[1]}"
+                autodetect="${cfg_values[2]}"
+                skip_processed="${cfg_values[3]}"
+                use_config=1
+            else
+                color_msg "red" "Error: No configuration presets found. Run the script normally first to create one.\n" "bold"
+                exit 1
+            fi
+        else
+            color_msg "red" "Error: No configuration presets found. Run the script normally first to create one.\n" "bold"
+            exit 1
+        fi
+    fi
+    
+    if [ "$autodetect" -eq 0 ]; then
+        color_msg "red" "Error: Daemon mode requires auto-detect mode\n" "bold"
+        exit 1
+    fi
+    
+    if ! command -v inotifywait &> /dev/null; then
+        color_msg "red" "Error: inotify-tools is required for daemon mode\n" "bold"
+        color_msg "white" "Install with: sudo apt install inotify-tools\n"
+        exit 1
+    fi
+    
+    if [ "$skip_processed" -eq 1 ]; then
+        game_name="$(echo "${steampath##*/common/}" | cut -d'/' -f1)"
+        path_hash_dir="$path_hash/$game_name"
+        path_hash_file="$path_hash_dir/hash.dat"
+        mkdir -p "$path_hash_dir"
+        declare -gA hash_seen
+        if [ -f "$path_hash_file" ]; then
+            while IFS= read -r line; do
+                [[ -n "$line" ]] && hash_seen["$line"]=1
+            done < "$path_hash_file" 2>/dev/null
+        fi
+        export path_hash_file
+    fi
+    
+    color_msg "green" "Starting daemon mode for game: $(echo "${steampath##*/common/}" | cut -d'/' -f1)\n" "bold"
+    color_msg "white" "Press Ctrl+C to stop monitoring\n\n"
+    
+    monitor_maps
+    exit 0
+fi
 
 if [ "$use_config" -eq 0 ] && [ "$(checkconfig 1)" -ne 0 ]; then
     color_msg "white" "Use configuration preset? [Y/n] " "bold"
