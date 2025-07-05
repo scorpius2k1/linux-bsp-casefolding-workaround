@@ -41,6 +41,10 @@ Fedora-based (dnf)
 ```
 sudo dnf makecache && sudo dnf install curl inotify-tools libnotify parallel rsync unzip -y
 ```
+Gentoo-based (portage)
+```
+sudo emerge --sync && sudo emerge -qN net-misc/curl sys-fs/inotify-tools sys-process/parallel net-misc/rsync app-arch/unzip
+```
 
 ### Installation
 1. Clone:
