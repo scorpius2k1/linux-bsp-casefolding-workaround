@@ -43,7 +43,7 @@ sudo dnf makecache && sudo dnf install curl inotify-tools libnotify parallel rsy
 ```
 Gentoo-based (portage)
 ```
-sudo emerge --sync && sudo emerge -qN net-misc/curl sys-fs/inotify-tools sys-process/parallel net-misc/rsync app-arch/unzip
+sudo emerge --sync && sudo emerge -qN net-misc/curl sys-fs/inotify-tools x11-libs/libnotify sys-process/parallel net-misc/rsync app-arch/unzip
 ```
 
 ### Installation
