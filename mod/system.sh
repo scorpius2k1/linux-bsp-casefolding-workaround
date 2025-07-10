@@ -33,6 +33,10 @@ checkdeps() {
             distro="arch"
             cache_cmd="sudo pacman -Syy"
             install_cmd="sudo pacman -S --noconfirm"
+        elif command -v emerge &>/dev/null; then
+            distro="gentoo"
+            cache_cmd="sudo emerge --sync"
+            install_cmd="sudo emerge -qN"
         elif command -v apt &>/dev/null; then
             distro="debian"
             cache_cmd="sudo apt update"
@@ -77,6 +81,16 @@ checkdeps() {
                             *) install_pkgs+=("$dep") ;;
                         esac
                         ;;
+                    gentoo)
+                        case "$dep" in
+                            curl) install_pkgs+=("net-misc/curl") ;;
+                            inotifywait) install_pkgs+=("sys-fs/inotify-tools") ;;
+                            notify-send) install_pkgs+=("x11-libs/libnotify") ;;
+                            parallel) install_pkgs+=("sys-process/parallel") ;;
+                            rsync) install_pkgs+=("net-misc/rsync") ;;
+                            unzip) install_pkgs+=("app-arch/unzip") ;;
+                            *) install_pkgs+=("$dep") ;;
+                        esac
                 esac
             done
 
