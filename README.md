@@ -1,3 +1,11 @@
+---
+
+#### UPDATE: A more efficient preloadable library designed to address this issue is available:<br/>
+🔗 [https://github.com/scorpius2k1/libcasefolding](https://github.com/scorpius2k1/libcasefolding)
+
+---
+<br/>
+
 # ![image](https://github.com/user-attachments/assets/128c8a61-2dcc-45a5-a972-6335c6c9a7fd) Linux BSP Case Folding Workaround (lbspcfw)
 
 Linux BSP Case Folding Workaround is a Linux bash script designed to resolve client-side compatibility with maps (BSP) with case folding issues with custom content in Valve Source 1 engine games on Linux, such as Half-Life 2 Deathmatch, Counter-Strike: Source, Team Fortress 2, and many others. It addresses missing textures, models, and sounds due to case sensitivity mismatches by extracting and syncing assets to the game folder, from which they are then parsed properly by the game.<br/>
