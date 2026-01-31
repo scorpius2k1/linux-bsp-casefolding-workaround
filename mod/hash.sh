@@ -1,18 +1,30 @@
-hash_check() {
-    [[ "$skip_processed" -eq 0 ]] && return 1
+hash_create() {
+    local f="$1"
+    [[ ! -e "$f" ]] && return 1
 
-    local -n hashes=$1
-    local filename="$2"
+    local info
+    if [[ -d "$f" ]]; then
+        info="$f"
+    elif [[ -L "$f" ]]; then
+        info="$f|$(readlink -f "$f")|$(stat -c "%s %Y" "$f" 2>/dev/null)"
+    else
+        info="$f|$(stat -c "%s %Y" "$f" 2>/dev/null)|$(head -c 1048576 "$f" 2>/dev/null | sha1sum | cut -d' ' -f1)"
+    fi
 
-    [[ -z "$filename" || ! -f "$filename" ]] && return 1
-
-    local hash=$(hash_create "$filename")
-    [[ -n "${hashes[$hash]}" ]] && { echo "$hash"; return 0; }
-
-    return 1
+    printf '%s' "$info" | sha1sum | cut -d' ' -f1
 }
 
-hash_create() {
-    [ -z "$1" ] && return 1
-    [ -d "$1" ] && echo "$1" | sha1sum - | cut -d' ' -f1 || stat --format="%d %s %Y %Z %n" "$1" 2>/dev/null | sha1sum - | cut -d' ' -f1
+hash_check() {
+    [[ "${skip_processed:-0}" -eq 0 ]] && return 1
+
+    local filename="$2"
+    local hash
+
+    hash=$(hash_create "$filename") || return 1
+    if grep -qFx "$hash" "$hash_parallel" 2>/dev/null; then
+        echo "$hash"
+        return 0
+    fi
+
+    return 1
 }

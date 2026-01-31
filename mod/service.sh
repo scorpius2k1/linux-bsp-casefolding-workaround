@@ -1,20 +1,19 @@
 create_user_service() {
-    [ -z "$1" ] || [ -z "$2" ] && return 1
+    [ -z "$1" ] || [ -z "$2" ] && return
 
     local game="$1"
     shift
     local game_desc="${2##*/}"
-    local script_path="$path_script/${0##*/}"
+    local script_path="$path_script/$script"
     local service_file="$HOME/.config/systemd/user/${game}.service"
     local service_name="${service_file##*/}"
     local quoted_args=""
 
     [ -z "$game" ] || [ ! -f "$script_path" ] && return 1
 
-    for arg in "$@"; do
-        [ -d "$arg" ] || [ -f "$arg" ] && quoted_args="$quoted_args \"$arg\"" || quoted_args="$quoted_args $arg"
-    done
-    quoted_args=${quoted_args# }
+    local script_path_escaped=$(realpath "$path_script/$script")
+    script_path_escaped="${script_path_escaped@Q}"
+    local escaped_args="${*@Q}"
 
     mk_dir "$HOME/.config/systemd/user"
     cat <<-EOF > "$service_file"
@@ -25,7 +24,7 @@ create_user_service() {
 
 		[Service]
 		Type=simple
-		ExecStart="$script_path" $quoted_args
+		ExecStart=$script_path_escaped $escaped_args
 		Restart=always
 		RestartSec=10
 
