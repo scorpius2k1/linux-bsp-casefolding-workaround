@@ -22,7 +22,7 @@ BSP map files reference assets (e.g., Materials/Walls/brick01.vtf) case-insensit
 
 ## 🚀 Usage
 ### Prerequisites
-- Linux OS with bash
+- Linux OS with bash version 4.0+
 - Dependencies: `curl inotifywait notify-send parallel rsync unzip`
 - Missing dependencies can be optionally be installed automatically by running the script
 
@@ -59,12 +59,32 @@ sudo emerge --sync && sudo emerge -qN net-misc/curl sys-fs/inotify-tools x11-lib
    ```
    chmod +x lbspcfw.sh
    ```
+4. Run:
+   ```
+   ./lbspcfw.sh
+   ```
 Alternatively, clone & run with one command:
 ```
 git clone https://github.com/scorpius2k1/linux-bsp-casefolding-workaround.git && cd linux-bsp-casefolding-workaround && chmod +x lbspcfw.sh && ./lbspcfw.sh
 ```
 
 ### Execution
+By default, the script runs with sensible defaults. However, several command-line arguments are available to customize its behavior for specific use cases. These options allow you to tailor the script for tasks such as monitoring, background services, Docker environments, and more.
+
+The following command-line arguments are available:
+- `--config`: Load a saved game preset to quickly apply specific configurations.
+- `--docker`: Execute the script within an isolated, containerized environment.
+- `--docker-rebuild`: Force a fresh image build and launch the script containerized.
+- `--docker-remove`: Remove the local Docker image and cleanup associated resources.
+- `--help`: Display this help message and exit.
+- `--monitor`: Track the active game process and apply fixes in real-time.
+- `--purge`: Remove all custom assets and wipe game cache files.
+- `--reset`: Reset all script data and configurations to factory defaults.
+- `--service`: Deploy a background daemon for persistent, automated monitoring.
+- `--undo`: Rollback via [precise] (default 1:1 list) or [recurse] (bottom-up folder purge).
+
+NOTE: Arguments are mutually exclusive and must be used individually. The only exception is `--reset`, which can be followed by one additional command.
+
 - Auto-detect:
   - Run `./lbspcfw.sh` (select **Y** to auto detect, choose game)
   - If you do not see your game in the list, please proceed with the manual method
@@ -80,7 +100,56 @@ git clone https://github.com/scorpius2k1/linux-bsp-casefolding-workaround.git &&
   - Alternatively, the `--config` parameter can also be passed as a command line argument `./lbspcfw.sh --config` to skip directly to the preset menu
 
 #### ** Map files are **not altered** in any way, data is only extracted from them **
-![Screenshot from 2025-03-08 10-50-46](https://github.com/user-attachments/assets/80e46bdb-a529-4859-9e6d-d646daace166)
+![LBSPCFW](https://github.com/user-attachments/assets/80e46bdb-a529-4859-9e6d-d646daace166)
+
+## 🐳 Docker Support
+
+LBSPCFW includes optional Docker support for running the script in a fully containerized environment.
+<img width="311" height="32" alt="image" src="https://github.com/user-attachments/assets/0453f6e7-ebc5-400a-a624-a44d3d611fd9" />
+
+### Why should I use Docker with this?
+Docker is useful if:
+- Your distribution lacks compatible versions of required dependencies
+- You prefer not to install additional packages on the host system
+- You want a reproducible, isolated runtime
+
+### Usage
+- Run the script containerized:
+  `./lbspcfw.sh --docker`
+
+- Rebuild the Docker image and run:
+  `./lbspcfw.sh --docker-rebuild`
+
+- Remove the Docker image:
+  `./lbspcfw.sh --docker-remove`
+
+When `--docker` is used, the script automatically builds (or reuses) the required image and executes all processing inside the container.
+
+**Important**: If core script files are updated (including via auto-update), run `--docker-rebuild` to synchronize the container.
+
+### Permissions & System Configuration
+Docker behavior varies by system:
+- Some systems require root privileges to run Docker commands
+- Others allow non-root usage via membership in the docker group
+
+Ensure Docker is installed and properly configured. If you encounter permission errors:
+- Run the script with sudo, or
+- Add your user to the docker group and re-login
+
+### Limitations
+Docker mode is intended for interactive execution only. The following features are not supported inside a container:
+- Asset Purge `--purge`
+- Asset Rollback `--undo`
+- Configuration presets `--config`
+- Monitoring mode `--monitor`
+- Script data reset `--reset`
+- Systemd service integration `--service`
+- Steam launch command integration `lbspcfw.sh %command%`
+
+Native execution is the default and recommended method, as it’s required for full functionality and filesystem monitoring.
+
+### Notes
+Docker is optional and only required when using `docker` flags.
 
 ## 🖥️ Automation
 - There are three options available: _script runtime_, _systemd service_, and _steam_ which can be ran simultaneously in the background to automatically process new maps for multiple games.
@@ -104,7 +173,14 @@ When using automation, it is possible that some maps may be loaded by the game b
 To work properly, all assets (materials, models, sound) extracted are **required** to be inside the game download folder (alternatively, they can be placed in the game root folder). Placing custom assets into the `custom` folder does not work since it seems to suffer the same case folding issue. This is due to the functionality of the game itself, _not_ the script. If you require any existing custom content to be retained, please back up your existing materials/models/sound folders **_prior_** to running this script.
 
 ## 🚩 Known Issues
-Multiple maps that use the same texture/model naming scheme but different versions can potentially [conflict with eachother](7), causing them not to render properly. While rare, this is difficult to address directly since the way Valve's Source1 engine processes external data cumulatively (no per-map option), making it implausible to address via a workaround such as this script.
+
+**Asset Conflicts**<br/>
+The Source 1 engine lacks per-map asset isolation for external data, meaning it processes all custom assets cumulatively. While this script correctly processes these assets, the engine can encounter conflicts—particularly when a large number of maps are processed.
+
+* **Extraction Overwrites:** If two or more maps utilize the same asset file path (e.g., `materials/custom/wall.vtf`) but contain different versions of that asset, the last map to be extracted will overwrite the file. Consequently, every map that references that file path will be forced to use whichever version was extracted last, leading to version mismatches.
+* **Rendering Artifacts:** As documented in [#1](https://github.com/scorpius2k1/linux-bsp-casefolding-workaround/issues/1), [#7](https://github.com/scorpius2k1/linux-bsp-casefolding-workaround/issues/7), and [#14](https://github.com/scorpius2k1/linux-bsp-casefolding-workaround/issues/14), these engine-level collisions cause textures to render incorrectly or become entirely invisible. This can result in an accidental "wall hack" effect where surfaces disappear; this is a known rendering bug within the game engine and is not a VAC-violating modification or a script error.
+* **Server-Side Enforcement (sv_pure):** Furthermore, servers utilizing the `sv_pure` setting will cause the engine to skip custom assets unless the server owner has specifically whitelisted them. Since such whitelisting is highly unlikely, any potential workaround is essentially impossible in this scenario.
+* **Inherent Limitation:** Because the engine's architecture does not allow for isolating these assets on a per-map basis, this behavior is a fundamental trait of how Source 1 handles external content and is unlikely to be resolved through any external method.
 
 ## 🗑 Removal
 - Navigate to your game `download` folder and remove `materials` `models` `sound` folders. If you retained any backups of these folders, be sure to restore them there afterwards. Once done, restart the game.

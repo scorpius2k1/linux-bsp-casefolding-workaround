@@ -2,7 +2,11 @@ prompt() {
     local default_value="${1,,}"
     local default_response=$([[ -z "$default_value" ]] && echo "1" || { [[ "$default_value" == "n" ]] && echo "0" || echo "1"; })
 
-    read -p "" response
+    if ! read -r response; then
+        echo "$default_response"
+        return
+    fi
+
     case "${response,,}" in
         y) echo '1' ;;
         n) echo '0' ;;
@@ -12,6 +16,7 @@ prompt() {
 
 color_msg() {
     [ "${use_steam:-0}" -eq 1 ] && return 0
+
     local color="$1"
     local text="$2"
     local style="${3:-normal}"
@@ -21,7 +26,7 @@ color_msg() {
         underline) style_code="\033[4m" ;;
     esac
     local color_code="${color_codes[$color]:-}"
-    printf "$style_code$color_code$text\033[0m"
+    printf "%b" "${style_code}${color_code}${text}\033[0m"
 }
 
 shorten_path() {
@@ -50,9 +55,11 @@ shorten_path() {
             IFS=/; echo "/${segments[*]}"
             return
         fi
-        IFS=/; short="/${segments[*]:0:depth}/.../${segments[*]: -$depth}"
+        local start=$((total - depth))
+        IFS=/; short="/${segments[*]:0:depth}/.../${segments[*]:start:depth}"
     else
-        IFS=/; short=".../${segments[*]: -$depth}"
+        local start=$((total - depth))
+        IFS=/; short=".../${segments[*]:start:depth}"
     fi
 
     echo "$short"
@@ -87,25 +94,82 @@ show_logo() {
     color_msg "bcyan" "$logo\n\n" "bold"
     color_msg "bcyan" ":: Linux BSP Case Folding Workaround ::\n"
     color_msg "bcyan" "=======================================\n\n"
+    [ "$IN_DOCKER" == "1" ] && color_msg "magenta" " 🐳 [CONTAINERIZED ENVIRONMENT]\n\n"
+}
+
+mk_dir() {
+    local target="$1"
+    [ -z "$target" ] && return 1
+    [ -d "$target" ] && return 0
+    
+    if [ -e "$target" ] || [ -L "$target" ]; then
+        color_msg "red" "Error: Cannot create directory '$target'. A file or symlink already exists at this path." "bold"
+        exit 1
+    fi
+    
+    mkdir -p -- "$target" || { 
+        color_msg "red" "Error: Failed to create $target" "bold"; 
+        exit 1; 
+    }
+    
+    return 0
 }
 
 rm_dir() {
-    [ ! -d "$1" ] && return 0
-    if [[ "$1" == */ ]]; then
-        rm -rf "$1"/* || { color_msg "red" "Error: Failed to remove contents of $1" "bold"; exit 1; }
-    else
-        rm -rf "$1" || { color_msg "red" "Error: Failed to remove $1" "bold"; exit 1; }
-    fi
+    local target="$1"
+    [ -z "$target" ] && return 1
+
+    local contents_only=false
+    [[ "$target" == */ ]] && contents_only=true
+
+    local clean_target="${target%/}"
+
+    case "$clean_target" in
+        ""|"/"|"/home"|"/root"|"/bin"|"/etc"|"/usr"|"/var"|"/boot"|"/dev")
+            color_msg "red" "Error: Protection triggered for system path: $target" "bold"
+            exit 1
+            ;;
+        *)
+            [ ! -d "$clean_target" ] && return 0
+
+            local target_dev parent_dev
+            target_dev=$(stat -c %d "$clean_target" 2>/dev/null)
+            parent_dev=$(stat -c %d "$(dirname "$clean_target")" 2>/dev/null)
+
+            if [ "$target_dev" != "$parent_dev" ] && [ "$contents_only" = false ]; then
+                color_msg "yellow" "Warning: $clean_target is a mount point. Switching to 'contents only' mode."
+                contents_only=true
+            fi
+
+            if [ "$contents_only" = true ]; then
+                find "$clean_target" -xdev -mindepth 1 -delete || { 
+                    color_msg "red" "Error: Failed to clear $clean_target" "bold"; exit 1; 
+                }
+            else
+                rm -rf -- "$clean_target" || { 
+                    color_msg "red" "Error: Failed to remove $clean_target" "bold"; exit 1; 
+                }
+            fi
+            ;;
+    esac
     return 0
 }
 
 rm_file() {
-    [ ! -f "$1" ] && return 0
-    rm -f "$1" || { color_msg "red" "Error: Failed to remove file $1" "bold"; exit 1; }
-    return 0
-}
-
-mk_dir() {
-    mkdir -p "$1" || { color_msg "red" "Error: Failed to create $1\n" "bold"; exit 1; }
+    local target="$1"
+    [ -z "$target" ] && return 1
+    
+    [ -d "$target" ] && [ ! -L "$target" ] && { 
+        color_msg "red" "Error: '$target' is a directory, not a file." "bold"; 
+        return 1; 
+    }
+    
+    [ ! -e "$target" ] && [ ! -L "$target" ] && return 0
+    
+    rm -f -- "$target" || { 
+        color_msg "red" "Error: Failed to remove file $target" "bold"; 
+        exit 1; 
+    }
+    
     return 0
 }

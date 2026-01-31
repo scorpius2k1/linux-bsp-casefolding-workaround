@@ -36,7 +36,8 @@ game_folder() {
                 done
                 [ "$all_found" -eq 1 ] && { printf '%s\n' "$current_parent"; return 0; }
             fi
-            declare -A found_items
+            unset found_items
+            declare -A found_items=()
             current_parent="$parent"
         fi
 
@@ -84,34 +85,98 @@ find_steam_libraries() {
     local array_name="$1"
     [ -z "$array_name" ] && return 1
 
-    eval "declare -ag $array_name"
-    eval "$array_name=()"
+    declare -n out="$array_name"
+    out=()
 
-    local found_paths=()
-    while IFS=' ' read -r _ mount_point _; do
-        case "$mount_point" in
-            /proc*|/sys*|/dev*|/run*|/snap*|/var/lib/docker*|/tmp*) continue ;;
+    local found=()
+    local maxdepth=12
+    declare -A scanned_roots=()
+
+    get_lib_root() { dirname "$(dirname "$1")"; }
+
+    local mounts
+    local exclude_run=1
+
+    if command -v findmnt >/dev/null 2>&1; then
+        mounts=$(findmnt -rn -o TARGET,SOURCE,FSTYPE,OPTIONS | awk '
+            $3 !~ /^(tmpfs|proc|sysfs|devtmpfs|cgroup2?|overlay)$/ &&
+            $4 !~ /(^|,)ro(,|$)/ {
+                if (!seen[$2]++) print $1
+            }
+        ')
+        exclude_run=0
+    else
+        mounts=$(awk '{print $2}' /proc/mounts)
+    fi
+
+    while IFS= read -r mount; do
+        case "$mount" in
+            /proc*|/sys*|/dev*|/snap*|/var/lib/docker*|/tmp*)
+                continue
+                ;;
+            /run*)
+                (( exclude_run )) && continue
+                ;;
         esac
-        [ -d "$mount_point" ] || continue
+
+        [ -d "$mount" ] || continue
+        [[ $EUID -ne 0 && "$HOME" == "$mount"* ]] && continue
+
         while IFS= read -r path; do
-            [ -n "$path" ] && found_paths+=("$path")
-        done < <(find "$mount_point" -type d -path "*/steamapps/common" 2>/dev/null)
-    done < /proc/mounts
+            local lib_root
+            lib_root="$(get_lib_root "$path")"
+            [[ -n "${scanned_roots["$lib_root"]}" ]] && continue
+            scanned_roots["$lib_root"]=1
+
+            found+=("$path")
+        done < <(
+            find "$mount" \
+                -maxdepth "$maxdepth" \
+                -type d \
+                \( -path "*/.cache" -o -path "*/Trash" -o -path "*/lost+found" \) -prune -o \
+                -path "*/steamapps/common" -print \
+                2>/dev/null
+        )
+    done <<< "$mounts"
 
     while IFS= read -r path; do
-        [ -n "$path" ] && found_paths+=("$path")
-    done < <(find "$HOME" -type d -path "*/steamapps/common" 2>/dev/null)
+        local lib_root
+        lib_root="$(get_lib_root "$path")"
+        [[ -n "${scanned_roots["$lib_root"]}" ]] && continue
+        scanned_roots["$lib_root"]=1
 
-    declare -A unique_paths
-    for path in "${found_paths[@]}"; do
-        unique_paths["$path"]=1
+        found+=("$path")
+    done < <(
+        find "$HOME" \
+            -maxdepth "$maxdepth" \
+            -type d \
+            -path "*/steamapps/common" \
+            2>/dev/null
+    )
+
+    declare -A seen
+    for p in "${found[@]}"; do
+        seen["$p"]=1
     done
 
-    for path in "${!unique_paths[@]}"; do
-        [ -n "$(find "$path" -maxdepth 1 -type d -not -path "$path" 2>/dev/null)" ] && eval "$array_name+=(\"$path\")"
+    local valid=()
+    for p in "${!seen[@]}"; do
+        if find "$p" -mindepth 1 -maxdepth 1 -type d >/dev/null 2>&1; then
+            valid+=("$p")
+        fi
+    done
+
+    IFS=$'\n' sorted=($(sort <<<"${valid[*]}"))
+    unset IFS
+
+    for p in "${sorted[@]}"; do
+        out+=("$p")
     done
 }
 
 clear_cache() {
-    [ -d "$1" ] && find "$1" -name "*.cache" -type f -delete 2>/dev/null && return 0 || return 1
+    [ -d "$1" ] || return 1
+    find "$1" -name "*.cache" -type f -print -quit | grep -q . || return 1
+    find "$1" -name "*.cache" -type f -delete 2>/dev/null || return 1
+    return 0
 }
