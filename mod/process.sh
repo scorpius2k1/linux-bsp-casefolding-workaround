@@ -1,3 +1,76 @@
+resolve_case_component() {
+    local parent="$1"
+    local want="$2"
+    local entry base
+
+    if [[ -e "$parent/$want" ]]; then
+        printf '%s' "$want"
+        return 0
+    fi
+
+    for entry in "$parent"/*; do
+        [[ -e "$entry" ]] || continue
+        base="${entry##*/}"
+        if [[ "${base,,}" == "${want,,}" ]]; then
+            if ln -s "$base" "$parent/$want" 2>/dev/null; then
+                echo "$parent/$want" >> "$path_undo/undo.dat"
+                echo "Case-fix symlink: '$parent/$want' -> '$base'" >&2
+            fi
+            printf '%s' "$want"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+resolve_material_case_ref() {
+    local root="$1"
+    local relpath="$2"
+    local cur="$root"
+    local part resolved
+    local -a parts
+
+    IFS='/' read -ra parts <<< "$relpath"
+    for part in "${parts[@]}"; do
+        [[ -z "$part" ]] && continue
+        resolved=$(resolve_case_component "$cur" "$part") || return 1
+        cur="$cur/$resolved"
+    done
+
+    return 0
+}
+
+resolve_material_case_refs() {
+    local job_tmp="$1"
+    local bsp_base="$2"
+    local vmt_root="$job_tmp/$bsp_base/materials"
+    local mat_dest="$path_sync/materials"
+    local vmt line key val
+
+    [[ -d "$vmt_root" && -d "$mat_dest" ]] || return 0
+
+    while IFS= read -r -d '' vmt; do
+        while IFS= read -r line; do
+            [[ "$line" =~ \"(\$[A-Za-z0-9_]+|include)\"[[:space:]]*\"([^\"]+)\" ]] || continue
+            key="${BASH_REMATCH[1]}"
+            val="${BASH_REMATCH[2]//\\//}"
+
+            if [[ "${key,,}" == "include" ]]; then
+                val="${val#materials/}"
+                val="${val#/}"
+            else
+                [[ "$val" == */* ]] || continue
+                val="${val}.vtf"
+            fi
+
+            resolve_material_case_ref "$mat_dest" "$val"
+        done < "$vmt"
+    done < <(find "$vmt_root" -type f -iname "*.vmt" -print0)
+
+    return 0
+}
+
 process_bsp() {
     local bsp="$1"
     local is_parallel="${2:-0}"
@@ -54,6 +127,8 @@ process_bsp() {
                 return 1
         fi
         echo "Successfully synchronized data for '$bsp_name' ($hash)" >&2
+
+        resolve_material_case_refs "$job_tmp" "$bsp_base"
     else
         echo "No relevant directories to sync for '$bsp_name' ($hash)" >&2
     fi
@@ -94,6 +169,9 @@ process_parallel() {
     export skip_processed
 
     export -f process_bsp
+    export -f resolve_material_case_refs
+    export -f resolve_material_case_ref
+    export -f resolve_case_component
     export -f rm_dir
     export -f rm_file
     export -f hash_check
