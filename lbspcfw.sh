@@ -12,7 +12,7 @@ exec 9<"$0"
 flock -n 9 || { echo "${0##*/} is already running."; exit 0; }
 
 readonly script="lbspcfw.sh"
-readonly version="1.05"
+readonly version="1.06"
 readonly logo="$(cat <<EOF
   _ _                     __          
  | | |                   / _|         
