@@ -41,6 +41,45 @@ resolve_material_case_ref() {
     return 0
 }
 
+# Linux Source 1 clients drop a single-character leading directory from
+# texture paths ("R/ramp2" is looked up as "materials//ramp2.vtf"), so
+# expose the texture where that lookup lands via a relative symlink.
+resolve_single_letter_ref() {
+    local root="$1"
+    local relpath="$2"
+    local rest="${relpath#*/}"
+    local source="$root/$relpath"
+    local target link dir
+
+    rest="${rest,,}"
+    target="$root/$rest"
+
+    if [[ ! -e "$source" ]]; then
+        echo "Single-letter ref: '$relpath' not found, skipping" >&2
+        return 1
+    fi
+
+    dir="${target%/*}"
+    if [[ ! -d "$dir" ]]; then
+        mkdir -p "$dir" || return 1
+        while [[ "$dir" != "$root" ]]; do
+            echo "$dir" >> "$path_undo/undo.dat"
+            dir="${dir%/*}"
+        done
+    fi
+
+    link=$(realpath -e --relative-to="${target%/*}" "$source") || return 1
+
+    if ln -s "$link" "$target" 2>/dev/null; then
+        echo "$target" >> "$path_undo/undo.dat"
+        echo "Single-letter symlink: '$target' -> '$link'" >&2
+    elif [[ ! -L "$target" || "$(readlink "$target")" != "$link" ]]; then
+        echo "Single-letter ref: '$target' already exists, not replacing (wanted -> '$link')" >&2
+    fi
+
+    return 0
+}
+
 resolve_material_case_refs() {
     local job_tmp="$1"
     local bsp_base="$2"
@@ -55,6 +94,7 @@ resolve_material_case_refs() {
             [[ "$line" =~ \"(\$[A-Za-z0-9_]+|include)\"[[:space:]]*\"([^\"]+)\" ]] || continue
             key="${BASH_REMATCH[1]}"
             val="${BASH_REMATCH[2]//\\//}"
+            while [[ "$val" == *//* ]]; do val="${val//\/\//\/}"; done
 
             if [[ "${key,,}" == "include" ]]; then
                 val="${val#materials/}"
@@ -65,6 +105,10 @@ resolve_material_case_refs() {
             fi
 
             resolve_material_case_ref "$mat_dest" "$val"
+
+            if [[ "${key,,}" != "include" && "$val" =~ ^[^/]/[^/] ]]; then
+                resolve_single_letter_ref "$mat_dest" "$val"
+            fi
         done < "$vmt"
     done < <(find "$vmt_root" -type f -iname "*.vmt" -print0)
 
@@ -171,6 +215,7 @@ process_parallel() {
     export -f process_bsp
     export -f resolve_material_case_refs
     export -f resolve_material_case_ref
+    export -f resolve_single_letter_ref
     export -f resolve_case_component
     export -f rm_dir
     export -f rm_file
