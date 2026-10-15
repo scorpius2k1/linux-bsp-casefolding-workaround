@@ -41,6 +41,28 @@ resolve_material_case_ref() {
     return 0
 }
 
+# The engine drops a one-letter top-level folder from texture paths, eg.
+# "$basetexture" "R/ground1" is loaded as "materials//ground1.vtf", so the
+# texture is also linked into the materials root where the engine looks.
+resolve_short_dir_ref() {
+    local root="$1"
+    local relpath="$2"
+    local dir="${relpath%%/*}"
+    local rest="${relpath#*/}"
+    local dest="$root/${rest,,}"
+
+    [[ ${#dir} -eq 1 && "$rest" != */* ]] || return 0
+    [[ -e "$root/$dir/$rest" ]] || return 0
+    [[ -e "$dest" || -L "$dest" ]] && return 0
+
+    if ln -s "$dir/$rest" "$dest" 2>/dev/null; then
+        echo "$dest" >> "$path_undo/undo.dat"
+        echo "Short-dir symlink: '$dest' -> '$dir/$rest'" >&2
+    fi
+
+    return 0
+}
+
 resolve_material_case_refs() {
     local job_tmp="$1"
     local bsp_base="$2"
@@ -64,7 +86,8 @@ resolve_material_case_refs() {
                 val="${val}.vtf"
             fi
 
-            resolve_material_case_ref "$mat_dest" "$val"
+            resolve_material_case_ref "$mat_dest" "$val" || continue
+            [[ "${key,,}" != "include" ]] && resolve_short_dir_ref "$mat_dest" "$val"
         done < "$vmt"
     done < <(find "$vmt_root" -type f -iname "*.vmt" -print0)
 
@@ -172,6 +195,7 @@ process_parallel() {
     export -f resolve_material_case_refs
     export -f resolve_material_case_ref
     export -f resolve_case_component
+    export -f resolve_short_dir_ref
     export -f rm_dir
     export -f rm_file
     export -f hash_check
